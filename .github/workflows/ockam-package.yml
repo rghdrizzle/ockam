@@ -24,6 +24,10 @@ env:
   ARTIFACT_NAME: ockam
   ORGANIZATION: ${{ github.repository_owner }}
 
+defaults:
+  run:
+    shell: bash
+
 jobs:
   build-and-publish-artifact:
     if: github.event.inputs.is_release == 'false'
@@ -37,51 +41,40 @@ jobs:
 
     steps:
       - name: Checker
-        shell: bash
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           set -ex
           mkdir assets && cd assets
           gh release download ${{ github.event.inputs.tag }} -R ${ORGANIZATION}/ockam
-
       - uses: actions/checkout@ac593985615ec2ede58e132d2e21d2b1cbd6127c
         with:
           path: ockam
 
       - id: image
-        shell: bash
         run: |
           tag_name="${{ github.event.inputs.tag }}"
           version=${tag_name:7}
           echo "image=ghcr.io/${ORGANIZATION}/$ARTIFACT_NAME:${version}-draft" >> $GITHUB_OUTPUT
-
       - name: Update Docker Template
-        shell: bash
         run: |
           set -x
           temp_dir=$(mktemp -d)
           cp ./ockam/tools/templates/ockam.dockerfile $temp_dir/Dockerfile
           cd $temp_dir
-
           binaries=(${{ github.event.inputs.binaries_sha }})
-
           for binary in ${binaries[@]}; do
             echo "$binary"
             file=(${binary//:/ })
             echo "${file[@]}"
-
             if [[ ${file[0]} == *".so"* || ${file[0]} == *".sig"* ]]; then
               echo "elixir nif library found, skipping."
               continue
             fi
-
             sed -i "s/${file[0]}_sha256_value/${file[1]}/g" Dockerfile
           done
-
           cat Dockerfile
           cp Dockerfile $GITHUB_WORKSPACE/ockam/tools/templates
-
       - uses: docker/login-action@f4ef78c080cd8ba55a85445d5b36e214a81df20a
         with:
           registry: ghcr.io
@@ -98,18 +91,14 @@ jobs:
         with:
           driver-opts: |
             image=moby/buildkit:v0.10.6
-
       - name: Build And Publish As Draft
         run: |
           tag_name="${{ github.event.inputs.tag }}"
           version=${tag_name:7}
-
           docker buildx build --push \
             --tag ghcr.io/${ORGANIZATION}/ockam:${version}-draft \
             --file ./ockam/tools/templates/Dockerfile \
             --platform linux/amd64,linux/arm64/v8,linux/arm/v7 .
-
-
   make-latest:
     if: github.event.inputs.is_release == 'true'
     name: "Make Draft Release Latest"
@@ -133,24 +122,18 @@ jobs:
           tag_name="${{ github.event.inputs.tag }}"
           version=${tag_name:7}
           echo "version=${version}" >> $GITHUB_OUTPUT
-
       - name: Deploy Latest Image
-        shell: bash
         run: |
           set -o xtrace
-
           docker pull ghcr.io/${ORGANIZATION}/ockam:${{ steps.image.outputs.version }}-draft
-
           manifest=$(docker manifest inspect -v ghcr.io/${ORGANIZATION}/ockam:${{ steps.image.outputs.version }}-draft)
           refs=$(echo $manifest | jq -r .[].Descriptor.digest)
-
           amended_refs=""
           for ref in ${refs[@]}; do
             amended_refs=" ${amended_refs[@]} --amend ghcr.io/${ORGANIZATION}/ockam@$ref"
           done
-
           docker manifest create ghcr.io/${ORGANIZATION}/ockam:${{ steps.image.outputs.version }} $amended_refs
           docker manifest push ghcr.io/${ORGANIZATION}/ockam:${{ steps.image.outputs.version }}
-
           docker manifest create ghcr.io/${ORGANIZATION}/ockam:latest $amended_refs
           docker manifest push ghcr.io/${ORGANIZATION}/ockam:latest
+
