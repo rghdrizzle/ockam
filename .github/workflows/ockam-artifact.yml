@@ -1,7 +1,4 @@
-
 name: Ockam Command Docker Artifact Build
-
-
 on:
   push:
     branches:
