@@ -4,6 +4,52 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## 0.61.0 - 2023-10-07
+
+### Changed
+
+- Updated dependencies
+
+## 0.60.0 - 2023-10-05
+
+### Changed
+
+- Updated dependencies
+
+## 0.59.0 - 2023-09-28
+
+### Changed
+
+- Updated dependencies
+
+### Fixed
+
+- Tungstenite 0.20.0 -> 0.20.1 bump related changes
+
+## 0.58.0 - 2023-09-13
+
+### Changed
+
+- Updated dependencies
+
+## 0.57.0 - 2023-09-06
+
+### Changed
+
+- Updated dependencies
+
+## 0.56.0 - 2023-06-26
+
+### Changed
+
+- Updated dependencies
+
+## 0.55.0 - 2023-06-09
+
+### Changed
+
+- Updated dependencies
+
 ## 0.54.0 - 2023-05-26
 
 ### Changed

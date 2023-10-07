@@ -1,16 +1,20 @@
-use crate::policy::policy_path;
-use crate::util::{extract_address_value, node_rpc, Rpc};
-use crate::{CommandGlobalOpts, Result};
 use clap::Args;
+
 use ockam::Context;
 use ockam_abac::{Action, Expr, Resource};
 use ockam_api::nodes::models::policy::Policy;
+use ockam_api::nodes::BackgroundNode;
 use ockam_core::api::Request;
+
+use crate::node::get_node_name;
+use crate::policy::policy_path;
+use crate::util::{node_rpc, parse_node_name};
+use crate::CommandGlobalOpts;
 
 #[derive(Clone, Debug, Args)]
 pub struct CreateCommand {
     #[arg(long, display_order = 900, id = "NODE_NAME")]
-    at: String,
+    at: Option<String>,
 
     #[arg(short, long)]
     resource: Resource,
@@ -28,16 +32,20 @@ impl CreateCommand {
     }
 }
 
-async fn rpc(mut ctx: Context, (opts, cmd): (CommandGlobalOpts, CreateCommand)) -> Result<()> {
-    run_impl(&mut ctx, opts, cmd).await
+async fn rpc(ctx: Context, (opts, cmd): (CommandGlobalOpts, CreateCommand)) -> miette::Result<()> {
+    run_impl(&ctx, opts, cmd).await
 }
 
-async fn run_impl(ctx: &mut Context, opts: CommandGlobalOpts, cmd: CreateCommand) -> Result<()> {
-    let node = extract_address_value(&cmd.at)?;
+async fn run_impl(
+    ctx: &Context,
+    opts: CommandGlobalOpts,
+    cmd: CreateCommand,
+) -> miette::Result<()> {
+    let at = get_node_name(&opts.state, &cmd.at);
+    let node_name = parse_node_name(&at)?;
     let bdy = Policy::new(cmd.expression);
     let req = Request::post(policy_path(&cmd.resource, &cmd.action)).body(bdy);
-    let mut rpc = Rpc::background(ctx, &opts, &node)?;
-    rpc.request(req).await?;
-    rpc.is_ok()?;
+    let node = BackgroundNode::create(ctx, &opts.state, &node_name).await?;
+    node.tell(ctx, req).await?;
     Ok(())
 }

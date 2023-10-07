@@ -32,17 +32,18 @@ jobs:
     # https://github.com/build-trust/ockam/commit/2fd0d36fe6ae0c2d527368683ec3a6352617b381
     env:
       FIRST_COMMIT: 2fd0d36fe6ae0c2d527368683ec3a6352617b381
+      CONTRIBUTORS_CSV_PATH: .github/CONTRIBUTORS.csv
 
     steps:
       - name: Checkout
         if: github.event_name != 'pull_request'
-        uses: actions/checkout@8e5e7e5ab8b370d6c329ec480221332ada57f0ab
+        uses: actions/checkout@8ade135a41bc03ea155e62e844d188df1ea18608
         with:
           fetch-depth: 0 # checkout full tree
 
       - name: Checkout (Pull Request)
         if: github.event_name == 'pull_request'
-        uses: actions/checkout@8e5e7e5ab8b370d6c329ec480221332ada57f0ab
+        uses: actions/checkout@8ade135a41bc03ea155e62e844d188df1ea18608
         with:
           fetch-depth: 0 # checkout full tree
           ref: ${{ github.event.pull_request.head.sha }}
@@ -123,11 +124,28 @@ jobs:
               https://github.com/build-trust/.github/blob/main/CONTRIBUTING.md#commit-messages
             ' && exit 1)
 
+      - name: Check If PR Author Made Changes Only To CONTRIBUTORS.csv
+        run: |
+          paths_updated=$(git diff --name-only origin/develop..HEAD)
+
+          if echo "$paths_updated" | grep $CONTRIBUTORS_CSV_PATH; then
+            # user has made changes to the CONTRIBUTORS.md file, we need to ensure that PR
+            # is only accepting the CLA
+            no_paths_updated=$(echo $paths_updated | wc -l)
+            if [[ $no_paths_updated -gt 1 ]]; then
+              echo "
+                We require that all contributors have accepted our Contributor License Agreement (CLA).
+                Please read the CLA and create a new pull request to accept the CLA by adding your Github details in a row at the end of the CONTRIBUTORS.csv file.
+                This new pull request must only change the CONTRIBUTORS.csv file.
+                CONTRIBUTORS.csv file is located at: $CONTRIBUTORS_CSV_PATH.
+                If you have any issues, please feel free to ask questions on this discussion thread https://github.com/build-trust/ockam/discussions/6112
+              " && exit 1
+            fi
+          fi
+
       - name: Get Contributors List
         run: |
-          curl --proto '=https' --tlsv1.2 --silent --show-error --fail \
-            https://raw.githubusercontent.com/build-trust/ockam-contributors/main/CONTRIBUTORS.csv \
-            > CONTRIBUTORS.csv
+          mv $CONTRIBUTORS_CSV_PATH CONTRIBUTORS.csv
 
       - name: Split Contributors List
         shell: python
@@ -167,12 +185,11 @@ jobs:
 
               Before we can merge, please accept our Contributor License Agreement (CLA).
 
-              1. Read the CLA at: https://github.com/build-trust/ockam-contributors/blob/main/CLA.md
+              1. Read the CLA at: https://github.com/build-trust/.github/blob/main/CLA.md
 
-              2. To accept the CLA, please send a different pull request to our
-              [contributors repository](https://github.com/build-trust/ockam-contributors) indicating
+              2. To accept the CLA, please create a different pull request indicating
               that you accept the CLA by adding your Git/Github details in a row at the end of the
-              [CONTRIBUTORS.csv](https://github.com/build-trust/ockam-contributors/blob/main/CONTRIBUTORS.csv)
+              [CONTRIBUTORS.csv](https://github.com/build-trust/ockam/blob/develop/.github/CONTRIBUTORS.csv)
               file.
 
               We look forward to merging your first contribution!
@@ -232,12 +249,11 @@ jobs:
               echo "
                 Before we can merge, please accept our Contributor License Agreement (CLA).
 
-                1. Read the CLA at: https://github.com/build-trust/ockam-contributors/blob/main/CLA.md
+                1. Read the CLA at: https://github.com/build-trust/.github/blob/main/CLA.md
 
-                2. To accept the CLA, please send a different pull request to our
-                [contributors repository](https://github.com/build-trust/ockam-contributors) indicating
+                2. To accept the CLA, please create a different pull request indicating
                 that you accept the CLA by adding your Git/Github details in a row at the end of the
-                [CONTRIBUTORS.csv](https://github.com/build-trust/ockam-contributors/blob/main/CONTRIBUTORS.csv)
+                [CONTRIBUTORS.csv](https://github.com/build-trust/ockam/blob/develop/.github/CONTRIBUTORS.csv)
                 file.
 
                 We look forward to merging your contribution!
@@ -248,9 +264,12 @@ jobs:
 
       - name: Get Developers List
         run: |
-          curl --proto '=https' --tlsv1.2 --silent --show-error --fail \
-            https://raw.githubusercontent.com/build-trust/ockam-contributors/main/DEVELOPERS.csv \
-            > DEVELOPERS.csv
+          gh api \
+            -H "Accept: application/vnd.github+json" \
+            -H "X-GitHub-Api-Version: 2022-11-28" \
+            /orgs/build-trust/members | jq -r '.[].login' > DEVELOPERS.csv
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
       - name: Check all commits in are Verified by Github (Pull Request)
         if: github.event_name == 'pull_request'
@@ -283,7 +302,7 @@ jobs:
     container: # gitlab.com/greut/eclint
       image: greut/eclint:v0.3.3@sha256:95e9a3dcbd236bae6569625cd403175cbde3705303774e7baca418b6442b8d77
     steps:
-      - uses: actions/checkout@8e5e7e5ab8b370d6c329ec480221332ada57f0ab
+      - uses: actions/checkout@8ade135a41bc03ea155e62e844d188df1ea18608
         with:
           ref: ${{ github.event.inputs.commit_sha }}
       - shell: sh
@@ -297,7 +316,7 @@ jobs:
     container:
       image: returntocorp/semgrep
     steps:
-      - uses: actions/checkout@8e5e7e5ab8b370d6c329ec480221332ada57f0ab
+      - uses: actions/checkout@8ade135a41bc03ea155e62e844d188df1ea18608
         with:
           ref: ${{ github.event.inputs.commit_sha }}
       - name: Run Semgrep

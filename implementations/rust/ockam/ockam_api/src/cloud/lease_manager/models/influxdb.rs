@@ -1,32 +1,25 @@
 use minicbor::{Decode, Encode};
-use ockam_core::CowStr;
 use serde::{Deserialize, Serialize};
 
 // ======= TOKEN STRUCT =======
 #[derive(Encode, Decode, Serialize, Deserialize, Debug)]
 #[cbor(map)]
-pub struct Token<'a> {
-    #[serde(borrow)]
-    #[cbor(b(1))]
-    pub id: CowStr<'a>,
+pub struct Token {
+    #[cbor(n(1))]
+    pub id: String,
 
-    #[serde(borrow)]
-    #[cbor(b(2))]
-    pub issued_for: CowStr<'a>,
+    #[cbor(n(2))]
+    pub issued_for: String,
 
-    #[serde(borrow)]
-    #[cbor(b(3))]
-    pub created_at: CowStr<'a>,
+    #[cbor(n(3))]
+    pub created_at: String,
 
-    #[serde(borrow)]
-    #[cbor(b(4))]
-    pub expires: CowStr<'a>,
+    #[cbor(n(4))]
+    pub expires: String,
 
-    #[serde(borrow)]
-    #[cbor(b(5))]
-    pub token: CowStr<'a>,
+    #[cbor(n(5))]
+    pub token: String,
 
-    #[serde(borrow)]
-    #[cbor(b(6))]
-    pub status: CowStr<'a>,
+    #[cbor(n(6))]
+    pub status: String,
 }

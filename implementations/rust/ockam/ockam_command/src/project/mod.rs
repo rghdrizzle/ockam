@@ -1,14 +1,13 @@
 mod addon;
 mod create;
 mod delete;
-mod enroll;
+pub(crate) mod enroll;
 mod info;
 mod list;
 mod show;
 mod ticket;
 pub mod util;
-
-pub use info::ProjectInfo;
+mod version;
 
 use clap::{Args, Subcommand};
 
@@ -16,13 +15,14 @@ pub use crate::credential::get::GetCommand;
 pub use addon::AddonCommand;
 pub use create::CreateCommand;
 pub use delete::DeleteCommand;
+pub use enroll::EnrollCommand;
 pub use info::InfoCommand;
 pub use list::ListCommand;
 pub use show::ShowCommand;
 pub use ticket::TicketCommand;
+pub use version::VersionCommand;
 
 use crate::docs;
-use crate::project::enroll::EnrollCommand;
 use crate::CommandGlobalOpts;
 
 const LONG_ABOUT: &str = include_str!("./static/long_about.txt");
@@ -45,6 +45,7 @@ pub enum ProjectSubcommand {
     Delete(DeleteCommand),
     List(ListCommand),
     Show(ShowCommand),
+    Version(VersionCommand),
     Information(InfoCommand),
     Ticket(TicketCommand),
     Addon(AddonCommand),
@@ -58,6 +59,7 @@ impl ProjectCommand {
             ProjectSubcommand::Delete(c) => c.run(options),
             ProjectSubcommand::List(c) => c.run(options),
             ProjectSubcommand::Show(c) => c.run(options),
+            ProjectSubcommand::Version(c) => c.run(options),
             ProjectSubcommand::Ticket(c) => c.run(options),
             ProjectSubcommand::Information(c) => c.run(options),
             ProjectSubcommand::Addon(c) => c.run(options),

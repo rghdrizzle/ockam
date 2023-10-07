@@ -1,34 +1,32 @@
 use minicbor::Decoder;
 use tracing::{debug, error, info, trace, warn};
 
-use ockam_core::api::{Error, Id, Request, Response, ResponseBuilder, Status};
+use ockam_core::api::{RequestHeader, Response};
 use ockam_core::async_trait;
 use ockam_core::compat::boxed::Box;
 use ockam_core::compat::{string::ToString, sync::Arc, vec::Vec};
 use ockam_core::{Result, Routed, Worker};
 use ockam_node::Context;
 
-use crate::credential::Credential;
 use crate::credentials::Credentials;
-use crate::identity::IdentityIdentifier;
-use crate::secure_channel::IdentitySecureChannelLocalInfo;
-use crate::TrustContext;
+use crate::models::{CredentialAndPurposeKey, Identifier};
+use crate::{IdentitySecureChannelLocalInfo, TrustContext};
 
 const TARGET: &str = "ockam::credential_exchange_worker::service";
 
 /// Worker responsible for receiving and verifying other party's credential
 pub struct CredentialsServerWorker {
-    credentials: Arc<dyn Credentials>,
+    credentials: Arc<Credentials>,
     trust_context: TrustContext,
-    identifier: IdentityIdentifier,
+    identifier: Identifier,
     present_back: bool,
 }
 
 impl CredentialsServerWorker {
     pub fn new(
-        credentials: Arc<dyn Credentials>,
+        credentials: Arc<Credentials>,
         trust_context: TrustContext,
-        identifier: IdentityIdentifier,
+        identifier: Identifier,
         present_back: bool,
     ) -> Self {
         Self {
@@ -44,8 +42,8 @@ impl CredentialsServerWorker {
     async fn handle_request(
         &mut self,
         ctx: &mut Context,
-        req: &Request<'_>,
-        sender: IdentityIdentifier,
+        req: &RequestHeader,
+        sender: Identifier,
         dec: &mut Decoder<'_>,
     ) -> Result<Vec<u8>> {
         trace! {
@@ -63,9 +61,7 @@ impl CredentialsServerWorker {
         let method = match req.method() {
             Some(m) => m,
             None => {
-                return Ok(Response::bad_request(req.id())
-                    .body("Invalid method")
-                    .to_vec()?);
+                return Ok(Response::bad_request(req, "Invalid method").to_vec()?);
             }
         };
 
@@ -75,28 +71,29 @@ impl CredentialsServerWorker {
                     "Received one-way credential presentation request from {}",
                     sender
                 );
-                let credential: Credential = dec.decode()?;
+                let credential_and_purpose_key: CredentialAndPurposeKey = dec.decode()?;
 
                 let res = self
                     .credentials
+                    .credentials_verification()
                     .receive_presented_credential(
                         &sender,
                         self.trust_context.authorities().await?.as_slice(),
-                        credential,
+                        &credential_and_purpose_key,
                     )
                     .await;
 
                 match res {
                     Ok(()) => {
                         debug!("One-way credential presentation request processed successfully with {}", sender);
-                        Response::ok(req.id()).to_vec()?
+                        Response::ok(req).to_vec()?
                     }
                     Err(err) => {
                         debug!(
                             "One-way credential presentation request processing error: {} for {}",
                             err, sender
                         );
-                        Self::bad_request(req.id(), req.path(), &err.to_string()).to_vec()?
+                        Response::bad_request(req, &err.to_string()).to_vec()?
                     }
                 }
             }
@@ -105,15 +102,16 @@ impl CredentialsServerWorker {
                     "Received mutual credential presentation request from {}",
                     sender
                 );
-                let credential: Credential = dec.decode()?;
+                let credential_and_purpose_key: CredentialAndPurposeKey = dec.decode()?;
 
-                info!("presented credential {}", credential);
+                // FIXME info!("presented credential {}", credential);
                 let res = self
                     .credentials
+                    .credentials_verification()
                     .receive_presented_credential(
                         &sender,
                         self.trust_context.authorities().await?.as_slice(),
-                        credential,
+                        &credential_and_purpose_key,
                     )
                     .await;
 
@@ -122,7 +120,7 @@ impl CredentialsServerWorker {
                         "Mutual credential presentation request processing error: {} from {}",
                         err, sender
                     );
-                    Self::bad_request(req.id(), req.path(), &err.to_string()).to_vec()?
+                    Response::bad_request(req, &err.to_string()).to_vec()?
                 } else {
                     debug!(
                         "Mutual credential presentation request processed successfully with {}",
@@ -136,11 +134,11 @@ impl CredentialsServerWorker {
                     match credential.as_ref() {
                         Ok(p) if self.present_back => {
                             info!("Mutual credential presentation request processed successfully with {}. Responding with own credential...", sender);
-                            Response::ok(req.id()).body(p).to_vec()?
+                            Response::ok(req).body(p).to_vec()?
                         }
                         _ => {
                             info!("Mutual credential presentation request processed successfully with {}. No credential to respond!", sender);
-                            Response::ok(req.id()).to_vec()?
+                            Response::ok(req).to_vec()?
                         }
                     }
                 }
@@ -149,18 +147,10 @@ impl CredentialsServerWorker {
             // ==*== Catch-all for Unimplemented APIs ==*==
             _ => {
                 warn!(%method, %path, "Called invalid endpoint");
-                Response::bad_request(req.id())
-                    .body(format!("Invalid endpoint: {}", path))
-                    .to_vec()?
+                Response::bad_request(req, &format!("Invalid endpoint: {}", path)).to_vec()?
             }
         };
         Ok(r)
-    }
-
-    /// Create a generic bad request response.
-    pub fn bad_request<'a>(id: Id, path: &'a str, msg: &'a str) -> ResponseBuilder<Error<'a>> {
-        let e = Error::new(path).with_message(msg);
-        Response::bad_request(id).body(e)
     }
 }
 
@@ -175,7 +165,7 @@ impl Worker for CredentialsServerWorker {
         msg: Routed<Self::Message>,
     ) -> Result<()> {
         let mut dec = Decoder::new(msg.as_body());
-        let req: Request = match dec.decode() {
+        let req: RequestHeader = match dec.decode() {
             Ok(r) => r,
             Err(e) => {
                 error!("failed to decode request: {:?}", e);
@@ -192,9 +182,7 @@ impl Worker for CredentialsServerWorker {
             // fail fast instead of failing silently here and force the listener to timeout.
             Err(err) => {
                 error!(?err, "Failed to handle message");
-                Response::builder(req.id(), Status::InternalServerError)
-                    .body(err.to_string())
-                    .to_vec()?
+                Response::internal_error(&req, &err.to_string()).to_vec()?
             }
         };
         ctx.send(msg.return_route(), r).await

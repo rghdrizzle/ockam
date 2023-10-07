@@ -4,6 +4,207 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## 0.97.0 - 2023-10-07
+
+### Changed
+
+- Move the controller address to the node manager
+- Implement subscriptions directly on the node manager
+- Start the node manager worker for remaining rpc calls
+- Extract an interface for subscriptions
+- Use better names for request / response headers
+- Use a more precise interface for the subscriptions trait
+- Introduce a secure client for the controller
+- Use a secure client to enroll
+- Use controller, authority and project nodes
+- Simplify the creation of a local node
+- Move the secure client close to secure channels
+- Reduce the dependencies of rpc
+- Move the rpc to ockam api as remote node
+- Rename local/remote node to in memory/background
+- Use only cli state to create a background node
+- Move the in memory node to the ockam api crate
+- Make the use of the controller client more explicit
+- Package all reply / response methods into a client
+- Use the client in the background node
+- Improve help of global verbose flag in ockam command
+- Improve `feedback` section of the `help` text
+- Improve cli "learn more" section from the help text
+- Updated dependencies
+
+### Fixed
+
+- Breaking changes in upgrading dialoguer crate to 0.11.0
+- Fix a test argument
+- Drop the in memory node and delete its node manager
+
+### Removed
+
+- Remove the unused tag feature
+- Remove the supervised node manager
+- Remove the secure clients struct
+
+## 0.96.0 - 2023-10-05
+
+### Changed
+
+- Move the controller address to the node manager
+- Implement subscriptions directly on the node manager
+- Start the node manager worker for remaining rpc calls
+- Extract an interface for subscriptions
+- Use better names for request / response headers
+- Use a more precise interface for the subscriptions trait
+- Introduce a secure client for the controller
+- Use a secure client to enroll
+- Use controller, authority and project nodes
+- Simplify the creation of a local node
+- Move the secure client close to secure channels
+- Reduce the dependencies of rpc
+- Move the rpc to ockam api as remote node
+- Rename local/remote node to in memory/background
+- Use only cli state to create a background node
+- Move the in memory node to the ockam api crate
+- Make the use of the controller client more explicit
+- Package all reply / response methods into a client
+- Use the client in the background node
+- Improve help of global verbose flag in ockam command
+- Improve `feedback` section of the `help` text
+- Improve cli "learn more" section from the help text
+- Updated dependencies
+
+### Fixed
+
+- Breaking changes in upgrading dialoguer crate to 0.11.0
+- Fix a test argument
+
+### Removed
+
+- Remove the unused tag feature
+- Remove the supervised node manager
+- Remove the secure clients struct
+
+## 0.95.0 - 2023-09-28
+
+### Changed
+
+- Updated dependencies
+
+### Fixed
+
+- Reset cli state if it can't be parsed
+- Reset cli state if it can't be parsed
+- `ockam status` now works without an existing identity
+
+## 0.94.0 - 2023-09-23
+
+### Added
+
+- Add installation instructions for ockam command
+
+### Changed
+
+- Switch to new `Identity` design
+- Updated dependencies
+
+## 0.93.0 - 2023-09-22
+
+### Added
+
+- Add installation instructions for ockam command
+
+### Changed
+
+- Switch to new `Identity` design
+- Updated dependencies
+
+## 0.92.0 - 2023-09-13
+
+### Changed
+
+- Extract the output of request results from the rpc code
+- Replace most rpc new calls with either embedded or background
+- Updated dependencies
+
+### Removed
+
+- Remove the lifetime annotations for rpc
+
+## 0.91.0 - 2023-09-06
+
+### Added
+
+- Add flag to control whether a node redirects the logs to a file
+- Add support to create and list tcp-outlets on the desktop app
+- Add cli subcommand to list share invitations
+- Added new cli command to retrieve the project's version
+- Added a direct local kafka for simple deployments and fixed service registry
+
+### Changed
+
+- Foreground nodes always log to stdout
+- Scaffold for ockam_app with support for enroll
+- Formatting
+- Prototype command to check orchestrator nodes versions
+- Load controller address and identifier from env
+- Integrate orchestrator versions within the status command
+- Introduce an app state holding a context
+- Change some response functions
+- Optionally share service when creating the tcp-outlet
+- New sidecar to run inlet/outlet relay portal with one command
+- Simplify tcp-inlet creation
+- Move common code to `api` so we can remove `command` from `app`
+- Updated dependencies
+
+### Fixed
+
+- Foreground nodes will write logs to file on a fresh start
+- Fix compilation errors
+- Read default values for `GlobalArgs` from env variables
+
+### Removed
+
+- Removed api lifetimes to access node manager operations directly
+
+## 0.90.0 - 2023-06-26
+
+### Added
+
+- Add more meaningful error messages for `CLiState` errors
+- Add "preview" tag to commands that are in developer preview
+
+### Changed
+
+- Improve error messages returned when parsing the node name argument
+- Replace `crate::Result` with `miette::Result` as the main result type on command
+- Updated dependencies
+
+### Fixed
+
+- Fix and simplify cli pager used to display help texts
+
+## 0.89.0 - 2023-06-09
+
+### Added
+
+- Add standard list output and implement for all list commands
+
+### Changed
+
+- Use async configure addon endpoint
+- Improve error definitions within ockam command and error handling within ockam enroll
+- Paginate help texts
+- Full local kafka implementation which credential validation and flow control
+- Updated dependencies
+
+### Fixed
+
+- Fix test where the real `CliState` was being used instead of an isolated instance
+
+### Removed
+
+- Remove old config.json file and add migration
+- Remove usage of chrono, fix clippy issues
+
 ## 0.88.0 - 2023-05-26
 
 ### Added
@@ -286,7 +487,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Extend the declarative config support
 - Unify ockam_command help
 - `node create` to return result
-- `node start` reads from the config file to execute the appropiate commands
+- `node start` reads from the config file to execute the appropriate commands
 - Okta identity provider
 - Enforce certificate pinning on okta tenants
 - Reduce output for short help command

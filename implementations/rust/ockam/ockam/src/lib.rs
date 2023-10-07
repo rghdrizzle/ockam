@@ -67,15 +67,15 @@ pub use ockam_node::{
 
 mod delay;
 mod error;
-mod forwarding_service;
 mod metadata;
 mod monotonic;
+mod relay_service;
 mod system;
 mod unique;
 
 pub use error::OckamError;
-pub use forwarding_service::{ForwardingService, ForwardingServiceOptions};
 pub use metadata::OckamMessage;
+pub use relay_service::{RelayService, RelayServiceOptions};
 pub use system::{SystemBuilder, SystemHandler, WorkerSystem};
 pub use unique::unique_with_prefix;
 
@@ -133,21 +133,9 @@ pub mod compat {
     pub use ockam_node::tokio;
 }
 
-// TODO: these next few modules should be rethought when we do the updates for
-// getting the layer 2 crates to GA, but for now they just move things out of
-// the way.
-
-pub mod key_exchange {
-    //! Module containing types required for key exchange.
-    pub use ockam_core::NewKeyExchanger;
-    #[cfg(feature = "noise_xx")]
-    pub use ockam_key_exchange_xx::XXNewKeyExchanger;
-}
-
 #[cfg(feature = "ockam_vault")]
 pub mod vault {
     //! Types and traits relating to ockam vaults.
-    pub use ockam_vault::Vault;
     pub use ockam_vault::*;
 
     #[cfg(feature = "software_vault_storage")]

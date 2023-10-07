@@ -22,10 +22,6 @@ pub struct CreateCommand {
     #[arg(hide_default_value = true, default_value_t = hex::encode(&random::<[u8;4]>()))]
     name: String,
 
-    /// Path to the Vault storage file
-    #[arg(short, long)]
-    path: Option<String>,
-
     #[arg(long, default_value = "false")]
     aws_kms: bool,
 }
@@ -36,21 +32,18 @@ impl CreateCommand {
     }
 }
 
-async fn rpc(
-    mut ctx: Context,
-    (opts, cmd): (CommandGlobalOpts, CreateCommand),
-) -> crate::Result<()> {
-    run_impl(&mut ctx, opts, cmd).await
+async fn rpc(ctx: Context, (opts, cmd): (CommandGlobalOpts, CreateCommand)) -> miette::Result<()> {
+    run_impl(&ctx, opts, cmd).await
 }
 
 async fn run_impl(
-    _ctx: &mut Context,
+    _ctx: &Context,
     opts: CommandGlobalOpts,
     cmd: CreateCommand,
-) -> crate::Result<()> {
+) -> miette::Result<()> {
     let CreateCommand { name, aws_kms, .. } = cmd;
     let config = cli_state::VaultConfig::new(aws_kms)?;
-    if !opts.state.vaults.is_empty()? {
+    if opts.state.vaults.is_empty()? {
         opts.terminal.write_line(&fmt_info!(
             "This is the first vault to be created in this environment. It will be set as the default vault"
         ))?;

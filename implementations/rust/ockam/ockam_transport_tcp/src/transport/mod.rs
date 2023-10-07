@@ -1,8 +1,10 @@
-mod common;
+pub(crate) mod common;
 mod connection;
 mod lifecycle;
 mod listener;
 mod portals;
+
+pub use common::*;
 
 pub use crate::portal::options::*;
 

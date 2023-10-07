@@ -2,17 +2,17 @@ use core::fmt::Write;
 
 use clap::builder::NonEmptyStringValueParser;
 use clap::{Args, Subcommand};
+use miette::{miette, IntoDiagnostic};
 
 use ockam::Context;
-use ockam_api::cloud::subscription::Subscription;
-use ockam_api::cloud::CloudRequestWrapper;
-use ockam_core::api::Request;
-use ockam_core::CowStr;
+use ockam_api::cloud::subscription::{Subscription, Subscriptions};
+use ockam_api::cloud::Controller;
 
-use crate::node::util::delete_embedded_node;
+use ockam_api::nodes::InMemoryNode;
+
+use crate::output::Output;
 use crate::util::api::CloudOpts;
-use crate::util::output::Output;
-use crate::util::{node_rpc, Rpc};
+use crate::util::node_rpc;
 use crate::{docs, CommandGlobalOpts, Result};
 
 #[derive(Clone, Debug, Args)]
@@ -56,80 +56,61 @@ impl SubscriptionCommand {
 async fn run_impl(
     ctx: Context,
     (opts, cmd): (CommandGlobalOpts, SubscriptionCommand),
-) -> crate::Result<()> {
-    let controller_route = &cmd.cloud_opts.route();
-    let mut rpc = Rpc::embedded(&ctx, &opts).await?;
+) -> miette::Result<()> {
+    let node = InMemoryNode::start(&ctx, &opts.state).await?;
+    let controller = node.create_controller().await?;
+
     match cmd.subcommand {
         SubscriptionSubcommand::Show {
             subscription_id,
             space_id,
         } => {
-            let subscription_id = utils::subscription_id_from_cmd_args(
-                &ctx,
-                &opts,
-                rpc.node_name(),
-                controller_route,
-                subscription_id,
-                space_id,
-            )
-            .await?;
-            let req = Request::get(format!("subscription/{subscription_id}"))
-                .body(CloudRequestWrapper::bare(controller_route));
-            rpc.request(req).await?;
-            rpc.parse_and_print_response::<Subscription>()?;
+            match get_subscription_by_id_or_space_id(&controller, &ctx, subscription_id, space_id)
+                .await?
+            {
+                Some(subscription) => opts.terminal.write_line(&subscription.output()?)?,
+                None => opts
+                    .terminal
+                    .write_line("Please specify either a space id or a subscription id")?,
+            }
         }
     };
-    delete_embedded_node(&opts, rpc.node_name()).await;
     Ok(())
 }
 
-pub mod utils {
-    use anyhow::anyhow;
-
-    use ockam_multiaddr::MultiAddr;
-
-    use crate::util::RpcBuilder;
-
-    use super::*;
-
-    pub async fn subscription_id_from_cmd_args(
-        ctx: &Context,
-        opts: &CommandGlobalOpts,
-        api_node: &str,
-        controller_route: &MultiAddr,
-        subscription_id: Option<String>,
-        space_id: Option<String>,
-    ) -> crate::Result<String> {
-        match (subscription_id, space_id) {
-            (_, Some(space_id)) => {
-                subscription_id_from_space_id(ctx, opts, api_node, controller_route, &space_id)
-                    .await
-            }
-            (Some(subscription_id), _) => Ok(subscription_id),
-            _ => unreachable!(),
-        }
-    }
-
-    async fn subscription_id_from_space_id(
-        ctx: &Context,
-        opts: &CommandGlobalOpts,
-        api_node: &str,
-        controller_route: &MultiAddr,
-        space_id: &str,
-    ) -> crate::Result<String> {
-        let mut rpc = RpcBuilder::new(ctx, opts, api_node).build();
-        let req = Request::get("subscription").body(CloudRequestWrapper::bare(controller_route));
-        rpc.request(req).await?;
-        let subscriptions = rpc.parse_response::<Vec<Subscription>>()?;
-        let subscription = subscriptions
-            .into_iter()
-            .find(|s| s.space_id == Some(CowStr::from(space_id)))
-            .ok_or_else(|| anyhow!("no subscription found for space {}", space_id))?;
-        Ok(subscription.id.to_string())
+pub(crate) async fn get_subscription_by_id_or_space_id(
+    controller: &Controller,
+    ctx: &Context,
+    subscription_id: Option<String>,
+    space_id: Option<String>,
+) -> Result<Option<Subscription>> {
+    match (subscription_id, space_id) {
+        (Some(subscription_id), _) => Ok(Some(
+            controller
+                .get_subscription(ctx, subscription_id.clone())
+                .await
+                .and_then(|s| s.found())
+                .into_diagnostic()?
+                .ok_or_else(|| {
+                    miette!(
+                        "no subscription found for subscription id {}",
+                        subscription_id
+                    )
+                })?,
+        )),
+        (None, Some(space_id)) => Ok(Some(
+            controller
+                .get_subscription_by_space_id(ctx, space_id.clone())
+                .await
+                .and_then(|s| s.found())
+                .into_diagnostic()?
+                .ok_or_else(|| miette!("no subscription found for space {}", space_id))?,
+        )),
+        _ => Ok(None),
     }
 }
 
-impl Output for Subscription<'_> {
+impl Output for Subscription {
     fn output(&self) -> Result<String> {
         let mut w = String::new();
         write!(w, "Subscription")?;
@@ -138,16 +119,16 @@ impl Output for Subscription<'_> {
         write!(
             w,
             "\n  Space id: {}",
-            self.space_id.as_ref().unwrap_or(&CowStr::from("N/A"))
+            self.space_id.clone().unwrap_or("N/A".to_string())
         )?;
-        write!(w, "\n  Entitlements: {}", self.entitlements.as_ref())?;
-        write!(w, "\n  Metadata: {}", self.metadata.as_ref())?;
-        write!(w, "\n  Contact info: {}", self.contact_info.as_ref())?;
+        write!(w, "\n  Entitlements: {}", self.entitlements)?;
+        write!(w, "\n  Metadata: {}", self.metadata)?;
+        write!(w, "\n  Contact info: {}", self.contact_info)?;
         Ok(w)
     }
 }
 
-impl Output for Vec<Subscription<'_>> {
+impl Output for Vec<Subscription> {
     fn output(&self) -> Result<String> {
         if self.is_empty() {
             return Ok("No subscriptions found".to_string());
@@ -160,11 +141,11 @@ impl Output for Vec<Subscription<'_>> {
             write!(
                 w,
                 "\n  Space id: {}",
-                s.space_id.as_ref().unwrap_or(&CowStr::from("N/A"))
+                s.space_id.as_ref().unwrap_or(&"N/A".to_string())
             )?;
-            write!(w, "\n  Entitlements: {}", s.entitlements.as_ref())?;
-            write!(w, "\n  Metadata: {}", s.metadata.as_ref())?;
-            write!(w, "\n  Contact info: {}", s.contact_info.as_ref())?;
+            write!(w, "\n  Entitlements: {}", s.entitlements)?;
+            write!(w, "\n  Metadata: {}", s.metadata)?;
+            write!(w, "\n  Contact info: {}", s.contact_info)?;
             writeln!(w)?;
         }
         Ok(w)

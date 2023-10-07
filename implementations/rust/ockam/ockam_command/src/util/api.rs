@@ -2,94 +2,87 @@
 
 use std::path::PathBuf;
 
-use anyhow::{anyhow, Context};
 use clap::Args;
+use miette::miette;
 // TODO: maybe we can remove this cross-dependency inside the CLI?
 use minicbor::Decoder;
 use regex::Regex;
-use tracing::trace;
 
-use ockam::identity::IdentityIdentifier;
-use ockam_api::cli_state::{CliState, StateDirTrait, StateItemTrait};
-use ockam_api::cloud::project::Project;
-use ockam_api::cloud::{BareCloudRequestWrapper, CloudRequestWrapper};
-use ockam_api::config::cli::TrustContextConfig;
+use ockam::identity::Identifier;
+use ockam_api::cli_state::CliState;
 use ockam_api::nodes::models::flow_controls::AddConsumer;
 use ockam_api::nodes::models::services::{
     StartAuthenticatedServiceRequest, StartAuthenticatorRequest, StartCredentialsService,
-    StartHopServiceRequest, StartIdentityServiceRequest, StartOktaIdentityProviderRequest,
-    StartVerifierService,
+    StartHopServiceRequest, StartOktaIdentityProviderRequest,
 };
 use ockam_api::nodes::*;
+use ockam_api::trust_context::TrustContextConfigBuilder;
 use ockam_api::DefaultAddress;
-use ockam_core::api::RequestBuilder;
-use ockam_core::api::{Request, Response};
-use ockam_core::env::{get_env_with_default, FromString};
-use ockam_core::flow_control::{FlowControlId, FlowControlPolicy};
-use ockam_core::{Address, CowStr};
+use ockam_core::api::Request;
+use ockam_core::api::ResponseHeader;
+use ockam_core::flow_control::FlowControlId;
+use ockam_core::Address;
 use ockam_multiaddr::MultiAddr;
 
-use crate::project::ProjectInfo;
 use crate::service::config::OktaIdentityProviderConfig;
-use crate::util::DEFAULT_CONTROLLER_ADDRESS;
 use crate::Result;
 
 ////////////// !== generators
 
 /// Construct a request to query node status
-pub(crate) fn query_status() -> RequestBuilder<'static, ()> {
+pub(crate) fn query_status() -> Request<()> {
     Request::get("/node")
 }
 
 /// Construct a request to query node tcp listeners
-pub(crate) fn list_tcp_listeners() -> RequestBuilder<'static, ()> {
+pub(crate) fn list_tcp_listeners() -> Request<()> {
     Request::get("/node/tcp/listener")
 }
 
 /// Construct a request to create node tcp connection
 pub(crate) fn create_tcp_connection(
     cmd: &crate::tcp::connection::CreateCommand,
-) -> RequestBuilder<'static, models::transport::CreateTcpConnection> {
+) -> Request<models::transport::CreateTcpConnection> {
     let payload = models::transport::CreateTcpConnection::new(cmd.address.clone());
 
     Request::post("/node/tcp/connection").body(payload)
 }
 
 /// Construct a request to print a list of services for the given node
-pub(crate) fn list_services() -> RequestBuilder<'static, ()> {
+pub(crate) fn list_services() -> Request<()> {
     Request::get("/node/services")
 }
 
 /// Construct a request to print a list of inlets for the given node
-pub(crate) fn list_inlets() -> RequestBuilder<'static, ()> {
+pub(crate) fn list_inlets() -> Request<()> {
     Request::get("/node/inlet")
 }
 
 /// Construct a request to print a list of outlets for the given node
-pub(crate) fn list_outlets() -> RequestBuilder<'static, ()> {
+pub(crate) fn list_outlets() -> Request<()> {
     Request::get("/node/outlet")
 }
 
 /// Construct a request builder to list all secure channels on the given node
-pub(crate) fn list_secure_channels() -> RequestBuilder<'static, ()> {
+pub(crate) fn list_secure_channels() -> Request<()> {
     Request::get("/node/secure_channel")
 }
 
 /// Construct a request builder to list all workers on the given node
-pub(crate) fn list_workers() -> RequestBuilder<'static, ()> {
+pub(crate) fn list_workers() -> Request<()> {
     Request::get("/node/workers")
 }
 
 pub(crate) fn delete_secure_channel(
     addr: &Address,
-) -> RequestBuilder<'static, models::secure_channel::DeleteSecureChannelRequest<'static>> {
+) -> Request<models::secure_channel::DeleteSecureChannelRequest> {
     let payload = models::secure_channel::DeleteSecureChannelRequest::new(addr);
     Request::delete("/node/secure_channel").body(payload)
 }
 
 pub(crate) fn show_secure_channel(
     addr: &Address,
-) -> RequestBuilder<'static, models::secure_channel::ShowSecureChannelRequest<'static>> {
+) -> Request<models::secure_channel::ShowSecureChannelRequest> {
     let payload = models::secure_channel::ShowSecureChannelRequest::new(addr);
     Request::get("/node/show_secure_channel").body(payload)
 }
@@ -97,14 +90,14 @@ pub(crate) fn show_secure_channel(
 /// Construct a request to create Secure Channel Listeners
 pub(crate) fn create_secure_channel_listener(
     addr: &Address,
-    authorized_identifiers: Option<Vec<IdentityIdentifier>>,
-    identity: Option<String>,
+    authorized_identifiers: Option<Vec<Identifier>>,
+    identity_name: Option<String>,
 ) -> Result<Vec<u8>> {
     let payload = models::secure_channel::CreateSecureChannelListenerRequest::new(
         addr,
         authorized_identifiers,
         None,
-        identity,
+        identity_name,
     );
 
     let mut buf = vec![];
@@ -115,13 +108,13 @@ pub(crate) fn create_secure_channel_listener(
 }
 
 /// Construct a request to list Secure Channel Listeners
-pub(crate) fn list_secure_channel_listener() -> RequestBuilder<'static, ()> {
+pub(crate) fn list_secure_channel_listener() -> Request<()> {
     Request::get("/node/secure_channel_listener")
 }
 
 pub(crate) fn delete_secure_channel_listener(
     addr: &Address,
-) -> RequestBuilder<'static, models::secure_channel::DeleteSecureChannelListenerRequest<'static>> {
+) -> Request<models::secure_channel::DeleteSecureChannelListenerRequest> {
     let payload = models::secure_channel::DeleteSecureChannelListenerRequest::new(addr);
     Request::delete("/node/secure_channel_listener").body(payload)
 }
@@ -129,75 +122,55 @@ pub(crate) fn delete_secure_channel_listener(
 /// Construct a request to show Secure Channel Listener
 pub(crate) fn show_secure_channel_listener(
     addr: &Address,
-) -> RequestBuilder<'static, models::secure_channel::ShowSecureChannelListenerRequest<'static>> {
+) -> Request<models::secure_channel::ShowSecureChannelListenerRequest> {
     let payload = models::secure_channel::ShowSecureChannelListenerRequest::new(addr);
     Request::get("/node/show_secure_channel_listener").body(payload)
 }
 
 /// Construct a request to start a Hop Service
-pub(crate) fn start_hop_service(addr: &str) -> RequestBuilder<'static, StartHopServiceRequest> {
+pub(crate) fn start_hop_service(addr: &str) -> Request<StartHopServiceRequest> {
     let payload = StartHopServiceRequest::new(addr);
     Request::post(node_service(DefaultAddress::HOP_SERVICE)).body(payload)
 }
 
-/// Construct a request to start an Identity Service
-pub(crate) fn start_identity_service(
-    addr: &str,
-) -> RequestBuilder<'static, StartIdentityServiceRequest> {
-    let payload = StartIdentityServiceRequest::new(addr);
-    Request::post(node_service(DefaultAddress::IDENTITY_SERVICE)).body(payload)
-}
-
 /// Construct a request to start an Authenticated Service
-pub(crate) fn start_authenticated_service(
-    addr: &str,
-) -> RequestBuilder<'static, StartAuthenticatedServiceRequest> {
+pub(crate) fn start_authenticated_service(addr: &str) -> Request<StartAuthenticatedServiceRequest> {
     let payload = StartAuthenticatedServiceRequest::new(addr);
     Request::post(node_service(DefaultAddress::AUTHENTICATED_SERVICE)).body(payload)
 }
 
-/// Construct a request to start a Verifier Service
-pub(crate) fn start_verifier_service(addr: &str) -> RequestBuilder<'static, StartVerifierService> {
-    let payload = StartVerifierService::new(addr);
-    Request::post(node_service(DefaultAddress::VERIFIER)).body(payload)
-}
-
 /// Construct a request to start a Credential Service
-pub(crate) fn start_credentials_service<'a>(
-    public_identity: &'a str,
-    addr: &'a str,
+pub(crate) fn start_credentials_service(
+    public_identity: &str,
+    addr: &str,
     oneway: bool,
-) -> RequestBuilder<'static, StartCredentialsService<'a>> {
+) -> Request<StartCredentialsService> {
     let payload = StartCredentialsService::new(public_identity, addr, oneway);
     Request::post(node_service(DefaultAddress::CREDENTIALS_SERVICE)).body(payload)
 }
 
 /// Construct a request to start an Authenticator Service
-pub(crate) fn start_authenticator_service<'a>(
-    addr: &'a str,
-    project: &'a str,
-) -> RequestBuilder<'static, StartAuthenticatorRequest<'a>> {
+pub(crate) fn start_authenticator_service(
+    addr: &str,
+    project: &str,
+) -> Request<StartAuthenticatorRequest> {
     let payload = StartAuthenticatorRequest::new(addr, project.as_bytes());
     Request::post(node_service(DefaultAddress::DIRECT_AUTHENTICATOR)).body(payload)
 }
 
-pub(crate) fn add_consumer(
-    id: FlowControlId,
-    address: MultiAddr,
-    policy: FlowControlPolicy,
-) -> RequestBuilder<'static, AddConsumer> {
-    let payload = AddConsumer::new(id, address, policy);
+pub(crate) fn add_consumer(id: FlowControlId, address: MultiAddr) -> Request<AddConsumer> {
+    let payload = AddConsumer::new(id, address);
     Request::post("/node/flow_controls/add_consumer").body(payload)
 }
 
 pub(crate) fn start_okta_service(
-    cfg: &'_ OktaIdentityProviderConfig,
-) -> RequestBuilder<'static, StartOktaIdentityProviderRequest<'_>> {
+    cfg: &OktaIdentityProviderConfig,
+) -> Request<StartOktaIdentityProviderRequest> {
     let payload = StartOktaIdentityProviderRequest::new(
         &cfg.address,
         &cfg.tenant_base_url,
         &cfg.certificate,
-        cfg.attributes.iter().map(|s| s as &str).collect(),
+        cfg.attributes.clone(),
         cfg.project.as_bytes(),
     );
     Request::post(format!(
@@ -207,157 +180,24 @@ pub(crate) fn start_okta_service(
     .body(payload)
 }
 
-pub(crate) mod credentials {
-    use ockam_api::nodes::models::credentials::{GetCredentialRequest, PresentCredentialRequest};
-
-    use super::*;
-
-    pub(crate) fn present_credential(
-        to: &MultiAddr,
-        oneway: bool,
-    ) -> RequestBuilder<PresentCredentialRequest> {
-        let b = PresentCredentialRequest::new(to, oneway);
-        Request::post("/node/credentials/actions/present").body(b)
-    }
-
-    pub(crate) fn get_credential<'r>(
-        overwrite: bool,
-        identity_name: Option<String>,
-    ) -> RequestBuilder<'r, GetCredentialRequest> {
-        let b = GetCredentialRequest::new(overwrite, identity_name);
-        Request::post("/node/credentials/actions/get").body(b)
-    }
-}
-
 /// Return the path of a service given its name
 fn node_service(service_name: &str) -> String {
     format!("/node/services/{service_name}")
 }
 
-/// Helpers to create enroll API requests
-pub(crate) mod enroll {
-    use ockam_api::cloud::enroll::auth0::{Auth0Token, AuthenticateAuth0Token};
-
-    use crate::enroll::*;
-
-    use super::*;
-
-    pub(crate) fn auth0<'a>(
-        cmd: EnrollCommand,
-        token: Auth0Token,
-    ) -> RequestBuilder<'a, CloudRequestWrapper<'a, AuthenticateAuth0Token>> {
-        let token = AuthenticateAuth0Token::new(token);
-        Request::post("v0/enroll/auth0").body(CloudRequestWrapper::new(
-            token,
-            &cmd.cloud_opts.route(),
-            None::<CowStr>,
-        ))
-    }
-}
-
-/// Helpers to create spaces API requests
-pub(crate) mod space {
-    use ockam_api::cloud::space::*;
-
-    use crate::space::*;
-
-    use super::*;
-
-    pub(crate) fn create(cmd: &CreateCommand) -> RequestBuilder<CloudRequestWrapper<CreateSpace>> {
-        let b = CreateSpace::new(&cmd.name, &cmd.admins);
-        Request::post("v0/spaces").body(CloudRequestWrapper::new(
-            b,
-            &cmd.cloud_opts.route(),
-            None::<CowStr>,
-        ))
-    }
-
-    pub(crate) fn list(cloud_route: &MultiAddr) -> RequestBuilder<BareCloudRequestWrapper> {
-        Request::get("v0/spaces").body(CloudRequestWrapper::bare(cloud_route))
-    }
-
-    pub(crate) fn show<'a>(
-        id: &str,
-        cloud_route: &'a MultiAddr,
-    ) -> RequestBuilder<'a, BareCloudRequestWrapper<'a>> {
-        Request::get(format!("v0/spaces/{id}")).body(CloudRequestWrapper::bare(cloud_route))
-    }
-
-    pub(crate) fn delete<'a>(
-        id: &str,
-        cloud_route: &'a MultiAddr,
-    ) -> RequestBuilder<'a, BareCloudRequestWrapper<'a>> {
-        Request::delete(format!("v0/spaces/{id}")).body(CloudRequestWrapper::bare(cloud_route))
-    }
-}
-
-/// Helpers to create projects API requests
-pub(crate) mod project {
-    use ockam_api::cloud::project::*;
-
-    use super::*;
-
-    pub(crate) fn create<'a>(
-        project_name: &'a str,
-        space_id: &'a str,
-        cloud_route: &'a MultiAddr,
-    ) -> RequestBuilder<'a, CloudRequestWrapper<'a, CreateProject<'a>>> {
-        let b = CreateProject::new::<&str, &str>(project_name, &[], &[]);
-        Request::post(format!("v1/spaces/{space_id}/projects")).body(CloudRequestWrapper::new(
-            b,
-            cloud_route,
-            None::<CowStr>,
-        ))
-    }
-
-    pub(crate) fn list(cloud_route: &MultiAddr) -> RequestBuilder<BareCloudRequestWrapper> {
-        Request::get("v0/projects").body(CloudRequestWrapper::bare(cloud_route))
-    }
-
-    pub(crate) fn show<'a>(
-        id: &str,
-        cloud_route: &'a MultiAddr,
-    ) -> RequestBuilder<'a, BareCloudRequestWrapper<'a>> {
-        Request::get(format!("v0/projects/{id}")).body(CloudRequestWrapper::bare(cloud_route))
-    }
-
-    pub(crate) fn delete<'a>(
-        space_id: &'a str,
-        project_id: &'a str,
-        cloud_route: &'a MultiAddr,
-    ) -> RequestBuilder<'a, BareCloudRequestWrapper<'a>> {
-        Request::delete(format!("v0/projects/{space_id}/{project_id}"))
-            .body(CloudRequestWrapper::bare(cloud_route))
-    }
-}
-
-/// Helpers to create operations API requests
-pub(crate) mod operation {
-    use super::*;
-
-    pub(crate) fn show<'a>(
-        id: &str,
-        cloud_route: &'a MultiAddr,
-    ) -> RequestBuilder<'a, BareCloudRequestWrapper<'a>> {
-        Request::get(format!("v1/operations/{id}")).body(CloudRequestWrapper::bare(cloud_route))
-    }
-}
-
 ////////////// !== parsers
 
-pub(crate) fn parse_create_secure_channel_listener_response(resp: &[u8]) -> Result<Response> {
+pub(crate) fn parse_create_secure_channel_listener_response(resp: &[u8]) -> Result<ResponseHeader> {
     let mut dec = Decoder::new(resp);
-    let response = dec.decode::<Response>()?;
+    let response = dec.decode::<ResponseHeader>()?;
     Ok(response)
 }
 
 ////////////// !== share CLI args
 
-pub(crate) const OCKAM_CONTROLLER_ADDR: &str = "OCKAM_CONTROLLER_ADDR";
-
 #[derive(Clone, Debug, Args)]
 pub struct CloudOpts {
-    #[arg(global = true, value_name = "IDENTITY", long)]
+    #[arg(global = true, value_name = "IDENTITY_NAME", long)]
     pub identity: Option<String>,
 }
 
@@ -375,165 +215,35 @@ pub struct TrustContextOpts {
     )]
     pub trust_context: Option<String>,
 
-    #[arg(global = true, long = "project")]
+    #[arg(global = true, long = "project", value_name = "PROJECT_NAME")]
     pub project: Option<String>,
 }
 
-pub struct TrustContextConfigBuilder {
-    cli_state: CliState,
-    project_path: Option<PathBuf>,
-    trust_context: Option<TrustContextConfig>,
-    project: Option<String>,
-    authority_identity: Option<String>,
-    credential_name: Option<String>,
-    use_default_trust_context: bool,
-}
-
-impl TrustContextConfigBuilder {
-    pub fn new(cli_state: &CliState, tco: &TrustContextOpts) -> Result<Self> {
-        let trust_context = match tco.clone().trust_context {
-            Some(tc) => Some(parse_trust_context(cli_state, &tc)?),
+impl TrustContextOpts {
+    pub fn to_config(&self, cli_state: &CliState) -> Result<TrustContextConfigBuilder> {
+        let trust_context = match &self.trust_context {
+            Some(tc) => Some(cli_state.trust_contexts.read_config_from_path(tc)?),
             None => None,
         };
-        Ok(Self {
+        Ok(TrustContextConfigBuilder {
             cli_state: cli_state.clone(),
-            project_path: tco.project_path.clone(),
+            project_path: self.project_path.clone(),
             trust_context,
-            project: tco.project.clone(),
+            project: self.project.clone(),
             authority_identity: None,
             credential_name: None,
             use_default_trust_context: true,
         })
     }
-
-    // with_authority_identity
-    pub fn with_authority_identity(&mut self, authority_identity: Option<&String>) -> &mut Self {
-        self.authority_identity = authority_identity.map(|s| s.to_string());
-        self
-    }
-
-    // with_credential_name
-    pub fn with_credential_name(&mut self, credential_name: Option<&String>) -> &mut Self {
-        self.credential_name = credential_name.map(|s| s.to_string());
-        self
-    }
-
-    pub fn use_default_trust_context(&mut self, use_default_trust_context: bool) -> &mut Self {
-        self.use_default_trust_context = use_default_trust_context;
-        self
-    }
-
-    pub fn build(&self) -> Option<TrustContextConfig> {
-        self.trust_context
-            .clone()
-            .or_else(|| self.get_from_project_path(self.project_path.as_ref()?))
-            .or_else(|| self.get_from_project_name())
-            .or_else(|| self.get_from_authority_identity())
-            .or_else(|| self.get_from_credential())
-            .or_else(|| self.get_from_default_trust_context())
-            .or_else(|| self.get_from_default_project())
-    }
-
-    fn get_from_project_path(&self, path: &PathBuf) -> Option<TrustContextConfig> {
-        let s = std::fs::read_to_string(path)
-            .context("Failed to read project file")
-            .ok()?;
-        let proj_info = serde_json::from_str::<ProjectInfo>(&s)
-            .context("Failed to parse project info")
-            .ok()?;
-        let proj: Project = (&proj_info).into();
-
-        proj.try_into().ok()
-    }
-
-    fn get_from_project_name(&self) -> Option<TrustContextConfig> {
-        let project = self.cli_state.projects.get(self.project.as_ref()?).ok()?;
-        project.config().clone().try_into().ok()
-    }
-
-    fn get_from_authority_identity(&self) -> Option<TrustContextConfig> {
-        let authority_identity = self.authority_identity.clone();
-        let credential = match &self.credential_name {
-            Some(c) => Some(self.cli_state.credentials.get(c).ok()?),
-            None => None,
-        };
-
-        TrustContextConfig::from_authority_identity(&authority_identity?, credential).ok()
-    }
-
-    fn get_from_credential(&self) -> Option<TrustContextConfig> {
-        let cred_name = self.credential_name.clone()?;
-        let cred_state = self.cli_state.credentials.get(cred_name).ok()?;
-
-        cred_state.try_into().ok()
-    }
-
-    fn get_from_default_trust_context(&self) -> Option<TrustContextConfig> {
-        if !self.use_default_trust_context {
-            return None;
-        }
-
-        let tc = self
-            .cli_state
-            .trust_contexts
-            .default()
-            .ok()?
-            .config()
-            .clone();
-        Some(tc)
-    }
-
-    fn get_from_default_project(&self) -> Option<TrustContextConfig> {
-        let proj = self.cli_state.projects.default().ok()?;
-        self.get_from_project_path(proj.path())
-    }
-}
-
-pub fn parse_trust_context(
-    cli_state: &CliState,
-    trust_context_input: &str,
-) -> Result<TrustContextConfig> {
-    let tcc = match std::fs::read_to_string(trust_context_input) {
-        Ok(s) => {
-            let mut tc = serde_json::from_str::<TrustContextConfig>(&s)
-                .context("Failed to parse trust context")?;
-            tc.set_path(PathBuf::from(trust_context_input));
-            tc
-        }
-        Err(_) => {
-            let state = cli_state.trust_contexts.get(trust_context_input).ok();
-            let state = state.context("Invalid Trust Context name or path")?;
-            let mut tcc = state.config().clone();
-            tcc.set_path(state.path().clone());
-            tcc
-        }
-    };
-
-    Ok(tcc)
-}
-
-impl CloudOpts {
-    pub fn route(&self) -> MultiAddr {
-        let default_addr = MultiAddr::from_string(DEFAULT_CONTROLLER_ADDRESS)
-            .context(format!(
-                "invalid Controller route: {DEFAULT_CONTROLLER_ADDRESS}"
-            ))
-            .unwrap();
-
-        let route = get_env_with_default::<MultiAddr>(OCKAM_CONTROLLER_ADDR, default_addr).unwrap();
-        trace!(%route, "Controller route");
-
-        route
-    }
 }
 
 ////////////// !== validators
 
-pub(crate) fn validate_cloud_resource_name(s: &str) -> Result<()> {
+pub(crate) fn validate_cloud_resource_name(s: &str) -> miette::Result<()> {
     let project_name_regex = Regex::new(r"^[a-zA-Z0-9]+([a-zA-Z0-9-_\.]?[a-zA-Z0-9])*$").unwrap();
     let is_project_name_valid = project_name_regex.is_match(s);
     if !is_project_name_valid {
-        Err(anyhow!("Invalid name").into())
+        Err(miette!("Invalid name"))
     } else {
         Ok(())
     }
@@ -571,7 +281,7 @@ mod test {
             "     name_with_multiple_leading_space",
             "name__with_consecutive_underscore",
             "_name_with_leading_underscore",
-            "name-with-traling-underscore_",
+            "name-with-trailing-underscore_",
             "name_with_consecutive---dashes",
             "name_with_trailing_dashes--",
             "---name_with_leading_dashes",

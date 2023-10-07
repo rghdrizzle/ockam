@@ -1,89 +1,190 @@
 use std::str::FromStr;
 
 use either::Either;
+use miette::IntoDiagnostic;
 use minicbor::Decoder;
 
-use ockam::identity::Credential;
+use ockam::identity::models::CredentialAndPurposeKey;
 use ockam::Result;
-use ockam_core::api::{Error, Request, Response, ResponseBuilder};
+use ockam_core::api::{Error, Request, RequestHeader, Response};
+use ockam_core::async_trait;
 use ockam_multiaddr::MultiAddr;
 use ockam_node::Context;
 
 use crate::cli_state::traits::StateDirTrait;
+use crate::cloud::AuthorityNode;
 use crate::error::ApiError;
 use crate::local_multiaddr_to_route;
 use crate::nodes::models::credentials::{GetCredentialRequest, PresentCredentialRequest};
-use crate::nodes::service::map_multiaddr_err;
+use crate::nodes::BackgroundNode;
 
 use super::NodeManagerWorker;
+
+#[async_trait]
+pub trait Credentials {
+    async fn authenticate(
+        &self,
+        ctx: &Context,
+        identity_name: Option<String>,
+    ) -> miette::Result<()> {
+        let _ = self.get_credential(ctx, false, identity_name).await?;
+        Ok(())
+    }
+
+    async fn get_credential(
+        &self,
+        ctx: &Context,
+        overwrite: bool,
+        identity_name: Option<String>,
+    ) -> miette::Result<CredentialAndPurposeKey>;
+
+    async fn present_credential(
+        &self,
+        ctx: &Context,
+        to: &MultiAddr,
+        oneway: bool,
+    ) -> miette::Result<()>;
+}
+
+#[async_trait]
+impl Credentials for AuthorityNode {
+    async fn get_credential(
+        &self,
+        ctx: &Context,
+        overwrite: bool,
+        identity_name: Option<String>,
+    ) -> miette::Result<CredentialAndPurposeKey> {
+        let body = GetCredentialRequest::new(overwrite, identity_name);
+        let req = Request::post("/node/credentials/actions/get").body(body);
+        self.0
+            .ask(ctx, "", req)
+            .await
+            .into_diagnostic()?
+            .success()
+            .into_diagnostic()
+    }
+
+    async fn present_credential(
+        &self,
+        ctx: &Context,
+        to: &MultiAddr,
+        oneway: bool,
+    ) -> miette::Result<()> {
+        let body = PresentCredentialRequest::new(to, oneway);
+        let req = Request::post("/node/credentials/actions/present").body(body);
+        self.0
+            .tell(ctx, "", req)
+            .await
+            .into_diagnostic()?
+            .success()
+            .into_diagnostic()
+    }
+}
+
+#[async_trait]
+impl Credentials for BackgroundNode {
+    async fn get_credential(
+        &self,
+        ctx: &Context,
+        overwrite: bool,
+        identity_name: Option<String>,
+    ) -> miette::Result<CredentialAndPurposeKey> {
+        let body = GetCredentialRequest::new(overwrite, identity_name);
+        self.ask(
+            ctx,
+            Request::post("/node/credentials/actions/get").body(body),
+        )
+        .await
+    }
+
+    async fn present_credential(
+        &self,
+        ctx: &Context,
+        to: &MultiAddr,
+        oneway: bool,
+    ) -> miette::Result<()> {
+        let body = PresentCredentialRequest::new(to, oneway);
+        self.tell(
+            ctx,
+            Request::post("/node/credentials/actions/present").body(body),
+        )
+        .await
+    }
+}
 
 impl NodeManagerWorker {
     pub(super) async fn get_credential(
         &mut self,
-        req: &Request<'_>,
+        req: &RequestHeader,
         dec: &mut Decoder<'_>,
         ctx: &Context,
-    ) -> Result<Either<ResponseBuilder<Error<'_>>, ResponseBuilder<Credential>>> {
-        let node_manager = self.node_manager.write().await;
+    ) -> Result<Either<Response<Error>, Response<CredentialAndPurposeKey>>> {
         let request: GetCredentialRequest = dec.decode()?;
 
         let identifier = if let Some(identity) = &request.identity_name {
-            node_manager
+            self.node_manager
                 .cli_state
                 .identities
                 .get(identity)?
                 .identifier()
         } else {
-            node_manager.identifier()
+            self.node_manager.identifier().clone()
         };
 
-        if let Ok(c) = node_manager
+        match self
+            .node_manager
             .trust_context()?
             .authority()?
             .credential(ctx, &identifier)
             .await
         {
-            Ok(Either::Right(Response::ok(req.id()).body(c)))
-        } else {
-            let err = Error::default().with_message("error getting credential");
-            Ok(Either::Left(Response::internal_error(req.id()).body(err)))
+            Ok(c) => Ok(Either::Right(Response::ok(req).body(c))),
+            Err(e) => Ok(Either::Left(Response::internal_error(
+                req,
+                &format!(
+                    "Error retrieving credential from authority for {}: {}",
+                    identifier, e,
+                ),
+            ))),
         }
     }
 
     pub(super) async fn present_credential(
         &self,
-        req: &Request<'_>,
+        req: &RequestHeader,
         dec: &mut Decoder<'_>,
         ctx: &Context,
-    ) -> Result<ResponseBuilder> {
-        let node_manager = self.node_manager.write().await;
+    ) -> Result<Response, Response<Error>> {
         let request: PresentCredentialRequest = dec.decode()?;
 
         // TODO: Replace with self.connect?
-        let route = MultiAddr::from_str(&request.route).map_err(map_multiaddr_err)?;
-        let route = match local_multiaddr_to_route(&route) {
-            Some(route) => route,
-            None => return Err(ApiError::generic("invalid credentials service route")),
-        };
+        let route = MultiAddr::from_str(&request.route).map_err(|_| {
+            ApiError::core(format!(
+                "Couldn't convert String to MultiAddr: {}",
+                &request.route
+            ))
+        })?;
+        let route = local_multiaddr_to_route(&route)?;
 
-        let credential = node_manager
+        let credential = self
+            .node_manager
             .trust_context()?
             .authority()?
-            .credential(ctx, &node_manager.identifier())
+            .credential(ctx, self.node_manager.identifier())
             .await?;
 
         if request.oneway {
-            node_manager
+            self.node_manager
                 .credentials_service()
                 .present_credential(ctx, route, credential)
                 .await?;
         } else {
-            node_manager
+            self.node_manager
                 .credentials_service()
                 .present_credential_mutual(
                     ctx,
                     route,
-                    node_manager
+                    self.node_manager
                         .trust_context()?
                         .authorities()
                         .await?
@@ -93,7 +194,7 @@ impl NodeManagerWorker {
                 .await?;
         }
 
-        let response = Response::ok(req.id());
+        let response = Response::ok(req);
         Ok(response)
     }
 }

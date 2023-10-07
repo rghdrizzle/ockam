@@ -23,7 +23,7 @@ fn run_01_inlet_outlet_one_process() -> Result<(), Error> {
 }
 
 #[test]
-fn run_02_inlet_outlet_seperate_processes() -> Result<(), Error> {
+fn run_02_inlet_outlet_separate_processes() -> Result<(), Error> {
     let routing_port = rand::thread_rng().gen_range(10000..65535);
     let inlet_port = rand::thread_rng().gen_range(10000..65535);
     // Spawn outlet, wait for it to start up
@@ -50,7 +50,8 @@ fn run_02_inlet_outlet_seperate_processes() -> Result<(), Error> {
 }
 
 #[test]
-fn run_03_inlet_outlet_seperate_processes_secure_channel() -> Result<(), Error> {
+#[ignore]
+fn run_03_inlet_outlet_separate_processes_secure_channel() -> Result<(), Error> {
     let routing_port = rand::thread_rng().gen_range(10000..65535);
     let inlet_port = rand::thread_rng().gen_range(10000..65535);
     // Spawn outlet, wait for it to start up
@@ -77,11 +78,12 @@ fn run_03_inlet_outlet_seperate_processes_secure_channel() -> Result<(), Error> 
 }
 
 #[test]
+#[ignore]
 fn run_04_inlet_outlet_seperate_processes_secure_channel_via_ockam_hub() -> Result<(), Error> {
     let port = rand::thread_rng().gen_range(10000..65535);
     // Spawn outlet, wait for it to start up, grab dynamic forwarding address
     let outlet = CmdBuilder::new("cargo run --example 04-outlet ockam.io:80").spawn()?;
-    outlet.match_stdout(r"(?i)RemoteForwarder was created on the node")?;
+    outlet.match_stdout(r"(?i)RemoteRelay was created on the node")?;
     let fwd_address = outlet.match_stdout(r"(?m)^FWD_(\w+)$")?.swap_remove(0).unwrap();
     println!("Forwarding address: {fwd_address}");
 

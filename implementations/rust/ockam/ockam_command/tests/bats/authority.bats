@@ -16,7 +16,6 @@ teardown() {
 
 @test "authority - standalone authority, enrollers, members" {
   port="$(random_port)"
-  PROJECT_JSON_PATH="$OCKAM_HOME/project-authority.json"
 
   run "$OCKAM" identity create authority
   run "$OCKAM" identity create enroller
@@ -25,7 +24,6 @@ teardown() {
   run "$OCKAM" identity create m2
   run "$OCKAM" identity create m3
 
-  unset OCKAM_LOG
   enroller_identifier=$($OCKAM identity show enroller)
   authority_identity_full=$($OCKAM identity show --full --encoding hex authority)
   m1_identifier=$($OCKAM identity show m1)
@@ -38,9 +36,11 @@ teardown() {
   assert_success
   sleep 1 # wait for authority to start TCP listener
 
+  PROJECT_JSON_PATH="$OCKAM_HOME/project-authority.json"
+  PROJECT_NAME="default"
   echo "{\"id\": \"1\",
-  \"name\" : \"default\",
-  \"identity\" : \"P6c20e814b56579306f55c64e8747e6c1b4a53d9a3f4ca83c252cc2fbfc72fa94\",
+  \"name\" : \"$PROJECT_NAME\",
+  \"identity\" : \"I6c20e814b56579306f55c64e8747e6c1b4a53d9a\",
   \"access_route\" : \"/dnsaddr/127.0.0.1/tcp/4000/service/api\",
   \"authority_access_route\" : \"/dnsaddr/127.0.0.1/tcp/$port/service/api\",
   \"authority_identity\" : \"$authority_identity_full\"}" >"$PROJECT_JSON_PATH"
@@ -52,19 +52,57 @@ teardown() {
 
   echo "$trusted" >"$OCKAM_HOME/trusted-anchors.json"
   # Restart the authority node with a trusted identities file and check that m1 can still enroll
-  run "$OCKAM" node delete authority
+  run "$OCKAM" node delete authority --yes
   run "$OCKAM" authority create --tcp-listener-address=127.0.0.1:$port --project-identifier 1 --reload-from-trusted-identities-file "$OCKAM_HOME/trusted-anchors.json"
   assert_success
   sleep 1 # wait for authority to start TCP listener
 
-  run "$OCKAM" project ticket --identity enroller --project-path "$PROJECT_JSON_PATH" --member $m2_identifier --attribute sample_attr=m2_member
+  run "$OCKAM" project ticket --identity enroller --project "$PROJECT_NAME" --member $m2_identifier --attribute sample_attr=m2_member
   assert_success
 
-  run "$OCKAM" project enroll --project-path "$PROJECT_JSON_PATH" --identity m2
+  run "$OCKAM" project enroll --force --project "$PROJECT_NAME" --identity m2
   assert_success
   assert_output --partial "m2_member"
 
-  token=$($OCKAM project ticket --identity enroller --project-path "$PROJECT_JSON_PATH" --attribute sample_attr=m3_member)
+  token=$($OCKAM project ticket --identity enroller --project "$PROJECT_NAME" --attribute sample_attr=m3_member)
+  run "$OCKAM" project enroll --force $token --identity m3
+  assert_success
+  assert_output --partial "m3_member"
+}
+
+@test "authority - enrollment ticket ttl" {
+  port="$(random_port)"
+
+  run "$OCKAM" identity create authority
+  run "$OCKAM" identity create enroller
+  #m3 will be added through enrollment token
+  run "$OCKAM" identity create m3
+
+  enroller_identifier=$($OCKAM identity show enroller)
+  authority_identity_full=$($OCKAM identity show --full --encoding hex authority)
+
+  # Start the authority node.
+  trusted="{\"$enroller_identifier\": {\"project_id\": \"1\", \"trust_context_id\": \"1\", \"ockam-role\": \"enroller\"}}"
+  run "$OCKAM" authority create --tcp-listener-address="127.0.0.1:$port" --project-identifier 1 --trusted-identities "$trusted"
+  assert_success
+  sleep 1 # wait for authority to start TCP listener
+
+  PROJECT_JSON_PATH="$OCKAM_HOME/project-authority.json"
+  echo "{\"id\": \"1\",
+  \"name\" : \"default\",
+  \"identity\" : \"I6c20e814b56579306f55c64e8747e6c1b4a53d9a\",
+  \"access_route\" : \"/dnsaddr/127.0.0.1/tcp/4000/service/api\",
+  \"authority_access_route\" : \"/dnsaddr/127.0.0.1/tcp/$port/service/api\",
+  \"authority_identity\" : \"$authority_identity_full\"}" >"$PROJECT_JSON_PATH"
+
+  # Enrollment ticket expired by the time it's used
+  token=$($OCKAM project ticket --identity enroller --project-path "$PROJECT_JSON_PATH" --attribute sample_attr=m3_member --expires-in 1s)
+  sleep 2
+  run "$OCKAM" project enroll $token --identity m3
+  assert_failure
+
+  # Enrollment ticket with enough ttl
+  token=$($OCKAM project ticket --identity enroller --project-path "$PROJECT_JSON_PATH" --attribute sample_attr=m3_member --expires-in 30s)
   run "$OCKAM" project enroll $token --identity m3
   assert_success
   assert_output --partial "m3_member"

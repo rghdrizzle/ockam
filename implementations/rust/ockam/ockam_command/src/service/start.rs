@@ -1,17 +1,18 @@
+use clap::{Args, Subcommand};
+use colorful::Colorful;
+use miette::miette;
+use minicbor::Encode;
+
+use ockam::Context;
+use ockam_api::nodes::BackgroundNode;
+use ockam_api::DefaultAddress;
+use ockam_core::api::Request;
+
 use crate::node::{get_node_name, initialize_node_if_default, NodeOpts};
 use crate::terminal::OckamColor;
-use crate::util::{api, node_rpc, RpcBuilder};
+use crate::util::{api, node_rpc};
 use crate::{fmt_ok, CommandGlobalOpts};
 use crate::{fmt_warn, Result};
-use anyhow::anyhow;
-use clap::{Args, Subcommand};
-
-use colorful::Colorful;
-use minicbor::Encode;
-use ockam::{Context, TcpTransport};
-
-use ockam_api::DefaultAddress;
-use ockam_core::api::{RequestBuilder, Status};
 
 /// Start a specified service
 #[derive(Clone, Debug, Args)]
@@ -28,16 +29,8 @@ pub enum StartSubCommand {
         #[arg(long, default_value_t = hop_default_addr())]
         addr: String,
     },
-    Identity {
-        #[arg(long, default_value_t = identity_default_addr())]
-        addr: String,
-    },
     Authenticated {
         #[arg(long, default_value_t = authenticated_default_addr())]
-        addr: String,
-    },
-    Verifier {
-        #[arg(long, default_value_t = verifier_default_addr())]
         addr: String,
     },
     Credentials {
@@ -63,16 +56,8 @@ fn hop_default_addr() -> String {
     DefaultAddress::HOP_SERVICE.to_string()
 }
 
-fn identity_default_addr() -> String {
-    DefaultAddress::IDENTITY_SERVICE.to_string()
-}
-
 fn authenticated_default_addr() -> String {
     DefaultAddress::AUTHENTICATED_SERVICE.to_string()
-}
-
-fn verifier_default_addr() -> String {
-    DefaultAddress::VERIFIER.to_string()
 }
 
 fn credentials_default_addr() -> String {
@@ -90,38 +75,23 @@ impl StartCommand {
     }
 }
 
-async fn rpc(
-    mut ctx: Context,
-    (opts, cmd): (CommandGlobalOpts, StartCommand),
-) -> crate::Result<()> {
-    run_impl(&mut ctx, opts, cmd).await
+async fn rpc(ctx: Context, (opts, cmd): (CommandGlobalOpts, StartCommand)) -> miette::Result<()> {
+    run_impl(&ctx, opts, cmd).await
 }
 
-async fn run_impl(
-    ctx: &mut Context,
-    opts: CommandGlobalOpts,
-    cmd: StartCommand,
-) -> crate::Result<()> {
+async fn run_impl(ctx: &Context, opts: CommandGlobalOpts, cmd: StartCommand) -> miette::Result<()> {
     let node_name = get_node_name(&opts.state, &cmd.node_opts.at_node);
-    let tcp = TcpTransport::create(ctx).await?;
+    let node = BackgroundNode::create(ctx, &opts.state, &node_name).await?;
     let mut is_hop_service = false;
     let addr = match cmd.create_subcommand {
         StartSubCommand::Hop { addr, .. } => {
             is_hop_service = true;
-            start_hop_service(ctx, &opts, &node_name, &addr, Some(&tcp)).await?;
-            addr
-        }
-        StartSubCommand::Identity { addr, .. } => {
-            start_identity_service(ctx, &opts, &node_name, &addr, Some(&tcp)).await?;
+            start_hop_service(ctx, &node, &addr).await?;
             addr
         }
         StartSubCommand::Authenticated { addr, .. } => {
             let req = api::start_authenticated_service(&addr);
-            start_service_impl(ctx, &opts, &node_name, "Authenticated", req, Some(&tcp)).await?;
-            addr
-        }
-        StartSubCommand::Verifier { addr, .. } => {
-            start_verifier_service(ctx, &opts, &node_name, &addr, Some(&tcp)).await?;
+            start_service_impl(ctx, &node, "Authenticated", req).await?;
             addr
         }
         StartSubCommand::Credentials {
@@ -131,12 +101,11 @@ async fn run_impl(
             ..
         } => {
             let req = api::start_credentials_service(&identity, &addr, oneway);
-            start_service_impl(ctx, &opts, &node_name, "Credentials", req, Some(&tcp)).await?;
+            start_service_impl(ctx, &node, "Credentials", req).await?;
             addr
         }
         StartSubCommand::Authenticator { addr, project, .. } => {
-            start_authenticator_service(ctx, &opts, &node_name, &addr, &project, Some(&tcp))
-                .await?;
+            start_authenticator_service(ctx, &node, &addr, &project).await?;
             addr
         }
     };
@@ -158,71 +127,36 @@ async fn run_impl(
 /// Helper function.
 pub(crate) async fn start_service_impl<T>(
     ctx: &Context,
-    opts: &CommandGlobalOpts,
-    node_name: &str,
+    node: &BackgroundNode,
     serv_name: &str,
-    req: RequestBuilder<'_, T>,
-    tcp: Option<&'_ TcpTransport>,
+    req: Request<T>,
 ) -> Result<()>
 where
     T: Encode<()>,
 {
-    let mut rpc = RpcBuilder::new(ctx, opts, node_name).tcp(tcp)?.build();
-    rpc.request(req).await?;
-
-    let (res, _dec) = rpc.check_response()?;
-    match res.status() {
-        Some(Status::Ok) => Ok(()),
-        _ => Err(anyhow!("Failed to start {serv_name} service").into()),
-    }
+    node.tell(ctx, req)
+        .await
+        .map_err(|_| miette!("Failed to start {} service", serv_name).into())
 }
 
 /// Public so `ockam_command::node::create` can use it.
 pub async fn start_hop_service(
     ctx: &Context,
-    opts: &CommandGlobalOpts,
-    node_name: &str,
+    node: &BackgroundNode,
     serv_addr: &str,
-    tcp: Option<&'_ TcpTransport>,
 ) -> Result<()> {
     let req = api::start_hop_service(serv_addr);
-    start_service_impl(ctx, opts, node_name, "Hop", req, tcp).await
-}
-
-/// Public so `ockam_command::node::create` can use it.
-pub async fn start_identity_service(
-    ctx: &Context,
-    opts: &CommandGlobalOpts,
-    node_name: &str,
-    serv_addr: &str,
-    tcp: Option<&'_ TcpTransport>,
-) -> Result<()> {
-    let req = api::start_identity_service(serv_addr);
-    start_service_impl(ctx, opts, node_name, "Identity", req, tcp).await
-}
-
-/// Public so `ockam_command::node::create` can use it.
-pub async fn start_verifier_service(
-    ctx: &Context,
-    opts: &CommandGlobalOpts,
-    node_name: &str,
-    serv_addr: &str,
-    tcp: Option<&'_ TcpTransport>,
-) -> Result<()> {
-    let req = api::start_verifier_service(serv_addr);
-    start_service_impl(ctx, opts, node_name, "Verifier", req, tcp).await
+    start_service_impl(ctx, node, "Hop", req).await
 }
 
 /// Public so `ockam_command::node::create` can use it.
 #[allow(clippy::too_many_arguments)]
 pub async fn start_authenticator_service(
     ctx: &Context,
-    opts: &CommandGlobalOpts,
-    node_name: &str,
+    node: &BackgroundNode,
     serv_addr: &str,
     project: &str,
-    tcp: Option<&'_ TcpTransport>,
 ) -> Result<()> {
     let req = api::start_authenticator_service(serv_addr, project);
-    start_service_impl(ctx, opts, node_name, "Authenticator", req, tcp).await
+    start_service_impl(ctx, node, "Authenticator", req).await
 }

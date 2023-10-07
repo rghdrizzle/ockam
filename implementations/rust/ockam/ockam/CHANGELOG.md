@@ -4,6 +4,85 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## 0.97.0 - 2023-10-07
+
+### Changed
+
+- Move the rpc to ockam api as remote node
+- Rename forwarder to relay
+- Improve `Vault` type-safety
+- Updated dependencies
+
+### Fixed
+
+- Fix some doc tests
+
+## 0.96.0 - 2023-10-05
+
+### Changed
+
+- Move the rpc to ockam api as remote node
+- Rename forwarder to relay
+- Improve `Vault` type-safety
+- Updated dependencies
+
+### Fixed
+
+- Fix some doc tests
+
+## 0.95.0 - 2023-09-28
+
+### Changed
+
+- Updated dependencies
+
+## 0.94.0 - 2023-09-23
+
+### Changed
+
+- Switch to new `Identity` design
+- Updated dependencies
+
+## 0.93.0 - 2023-09-22
+
+### Changed
+
+- Switch to new `Identity` design
+- Updated dependencies
+
+## 0.92.0 - 2023-09-13
+
+### Changed
+
+- Updated dependencies
+
+## 0.91.0 - 2023-09-06
+
+### Changed
+
+- Updated dependencies
+
+## 0.90.0 - 2023-06-26
+
+### Changed
+
+- Improve type safety for `FlowControls`
+- Hide `Spawner` vs `Producer` logic under the hood
+- Extract a full state machine for the secure channel handshake
+- Updated dependencies
+
+## 0.89.0 - 2023-06-09
+
+### Changed
+
+- Make `AccessControl` optional while starting a `Worker`
+- Improve `ProcessorBuilder`. make `AccessControl` optional while starting a `Processor`
+- Updated dependencies
+
+### Fixed
+
+- Fix clippy warning
+
 ## 0.88.0 - 2023-05-26
 
 ### Changed
@@ -61,7 +140,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - Introduce `TrustOptions::insecure()` and `::insecure_test()`
 - Improve `SecureChannelListener` `TrustOptions` for better support of consumer use case
-- Simplify `TrustOptions` for outgoing negotations
+- Simplify `TrustOptions` for outgoing negotiations
 - Rename `insecure_test` -> `new`
 - Rename `Sessions` -> `FlowControls`
 - Rename `TrustOptions` -> `Options`

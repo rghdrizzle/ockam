@@ -2,24 +2,27 @@ use ockam_core::compat::collections::HashMap;
 
 use crate::identity::{get_identity_name, initialize_identity_if_default};
 use crate::{
-    util::{node_rpc, print_encodable},
+    util::{node_rpc, parsers::identity_identifier_parser},
     vault::default_vault_name,
-    CommandGlobalOpts, EncodeFormat, Result,
+    CommandGlobalOpts, Result,
 };
-use anyhow::{anyhow, Context as _};
 use clap::Args;
-use ockam::identity::CredentialData;
+
+use crate::output::{CredentialAndPurposeKeyDisplay, EncodeFormat};
+use miette::{miette, IntoDiagnostic};
+use ockam::identity::utils::AttributesBuilder;
+use ockam::identity::Identifier;
+use ockam::identity::{MAX_CREDENTIAL_VALIDITY, PROJECT_MEMBER_SCHEMA, TRUST_CONTEXT_ID};
 use ockam::Context;
 use ockam_api::cli_state::traits::{StateDirTrait, StateItemTrait};
-use ockam_identity::{identities, Identity};
 
 #[derive(Clone, Debug, Args)]
 pub struct IssueCommand {
     #[arg(long = "as")]
     pub as_identity: Option<String>,
 
-    #[arg(long = "for", value_name = "IDENTITY_ID")]
-    pub for_identity: String,
+    #[arg(long = "for", value_name = "IDENTIFIER", value_parser = identity_identifier_parser)]
+    pub identity_identifier: Identifier,
 
     /// Attributes in `key=value` format to be attached to the member
     #[arg(short, long = "attribute", value_name = "ATTRIBUTE")]
@@ -43,44 +46,25 @@ impl IssueCommand {
         let mut attributes = HashMap::new();
         for attr in &self.attributes {
             let mut parts = attr.splitn(2, '=');
-            let key = parts.next().context("key expected")?;
-            let value = parts.next().context("value expected)")?;
+            let key = parts.next().ok_or(miette!("key expected"))?;
+            let value = parts.next().ok_or(miette!("value expected)"))?;
             attributes.insert(key.to_string(), value.to_string());
         }
         Ok(attributes)
     }
 
-    pub async fn identity(&self) -> Result<Identity> {
-        let identity_as_bytes = match hex::decode(&self.for_identity) {
-            Ok(b) => b,
-            Err(e) => return Err(anyhow!(e).into()),
-        };
-
-        let identity = identities()
-            .identities_creation()
-            .decode_identity(&identity_as_bytes)
-            .await?;
-        Ok(identity)
+    pub fn identity_identifier(&self) -> &Identifier {
+        &self.identity_identifier
     }
 }
 
 async fn run_impl(
     _ctx: Context,
     (opts, cmd): (CommandGlobalOpts, IssueCommand),
-) -> crate::Result<()> {
+) -> miette::Result<()> {
     let identity_name = get_identity_name(&opts.state, &cmd.as_identity);
     let ident_state = opts.state.identities.get(&identity_name)?;
     let auth_identity_identifier = ident_state.config().identifier().clone();
-
-    let mut attrs = cmd.attributes()?;
-    attrs.insert(
-        "project_id".to_string(), // TODO: DEPRECATE - Removing PROJECT_ID attribute in favor of TRUST_CONTEXT_ID
-        auth_identity_identifier.to_string(),
-    );
-    attrs.insert(
-        "trust_context_id".to_string(),
-        auth_identity_identifier.to_string(),
-    );
 
     let vault_name = cmd
         .vault
@@ -90,14 +74,30 @@ async fn run_impl(
     let identities = opts.state.get_identities(vault).await?;
     let issuer = ident_state.identifier();
 
-    let credential_data =
-        CredentialData::from_attributes(cmd.identity().await?.identifier(), issuer.clone(), attrs)?;
+    let mut attributes_builder = AttributesBuilder::with_schema(PROJECT_MEMBER_SCHEMA)
+        .with_attribute(
+            TRUST_CONTEXT_ID.to_vec(),
+            auth_identity_identifier.to_string(),
+        );
+    for (key, value) in cmd.attributes()? {
+        attributes_builder =
+            attributes_builder.with_attribute(key.as_bytes().to_vec(), value.as_bytes().to_vec());
+    }
+
     let credential = identities
         .credentials()
-        .issue_credential(&issuer, credential_data)
-        .await?;
+        .credentials_creation()
+        .issue_credential(
+            &issuer,
+            cmd.identity_identifier(),
+            attributes_builder.build(),
+            MAX_CREDENTIAL_VALIDITY,
+        )
+        .await
+        .into_diagnostic()?;
 
-    print_encodable(credential, &cmd.encode_format)?;
+    cmd.encode_format
+        .println_value(&CredentialAndPurposeKeyDisplay(credential))?;
 
     Ok(())
 }

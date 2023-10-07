@@ -1,5 +1,5 @@
 use anyhow::anyhow;
-use ockam::identity::credential::OneTimeCode;
+use ockam::identity::OneTimeCode;
 use ockam::Result;
 use ockam_api::identity::EnrollmentTicket;
 use ockam_core::errcode::{Kind, Origin};
@@ -27,7 +27,7 @@ pub async fn create_token(attribute_name: &str, attribute_value: &str) -> Result
     let decoded = hex::decode(token_string).map_err(|e| error(format!("{e}")))?;
     let ticket: EnrollmentTicket = serde_json::from_slice(&decoded).map_err(|e| error(format!("{e}")))?;
 
-    Ok(ticket.one_time_code().clone())
+    Ok(ticket.one_time_code.clone())
 }
 
 fn error(message: String) -> Error {

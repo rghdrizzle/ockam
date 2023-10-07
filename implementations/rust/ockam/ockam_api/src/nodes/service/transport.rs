@@ -1,18 +1,20 @@
-use crate::nodes::models::transport::{
-    CreateTcpConnection, CreateTcpListener, DeleteTransport, TransportList, TransportMode,
-    TransportStatus, TransportType,
-};
-use crate::nodes::service::ApiTransport;
+use std::net::SocketAddr;
+
 use minicbor::Decoder;
+
 use ockam::Result;
-use ockam_core::api::{Request, Response, ResponseBuilder};
-use ockam_core::flow_control::{FlowControlPolicy, FlowControls};
+use ockam_core::api::{Error, RequestHeader, Response};
 use ockam_core::Address;
 use ockam_node::Context;
 use ockam_transport_tcp::{
     TcpConnectionOptions, TcpListenerInfo, TcpListenerOptions, TcpSenderInfo, TcpTransport,
 };
-use std::net::SocketAddr;
+
+use crate::nodes::models::transport::{
+    CreateTcpConnection, CreateTcpListener, DeleteTransport, TransportList, TransportMode,
+    TransportStatus, TransportType,
+};
+use crate::nodes::service::ApiTransport;
 
 use super::NodeManagerWorker;
 
@@ -69,11 +71,8 @@ impl NodeManagerWorker {
         }
     }
 
-    pub(super) fn get_tcp_connections(
-        &self,
-        req: &Request,
-        tcp: &TcpTransport,
-    ) -> ResponseBuilder<TransportList> {
+    pub(super) async fn get_tcp_connections(&self, req: &RequestHeader) -> Response<TransportList> {
+        let tcp_transport = &self.node_manager.tcp_transport;
         let map = |info: &TcpSenderInfo| {
             TransportStatus::new(ApiTransport {
                 tt: TransportType::Tcp,
@@ -85,8 +84,9 @@ impl NodeManagerWorker {
             })
         };
 
-        Response::ok(req.id()).body(TransportList::new(
-            tcp.registry()
+        Response::ok(req).body(TransportList::new(
+            tcp_transport
+                .registry()
                 .get_all_sender_workers()
                 .iter()
                 .map(map)
@@ -94,22 +94,18 @@ impl NodeManagerWorker {
         ))
     }
 
-    pub(super) fn get_tcp_connection(
+    pub(super) async fn get_tcp_connection(
         &self,
-        req: &Request,
-        tcp: &TcpTransport,
+        req: &RequestHeader,
         address: String,
-    ) -> ResponseBuilder<TransportStatus> {
-        let sender = match Self::find_connection(tcp, address) {
+    ) -> Result<Response<TransportStatus>, Response<Error>> {
+        let tcp_transport = &self.node_manager.tcp_transport;
+        let sender = match Self::find_connection(tcp_transport, address.to_string()) {
             None => {
-                return Response::bad_request(req.id()).body(TransportStatus::new(ApiTransport {
-                    tt: TransportType::Tcp,
-                    tm: TransportMode::Outgoing,
-                    socket_address: "0.0.0.0:0000".parse().unwrap(),
-                    worker_address: "<none>".into(),
-                    processor_address: "<none>".into(),
-                    flow_control_id: FlowControls::generate_id(), // FIXME
-                }));
+                return Err(Response::not_found(
+                    req,
+                    &format!("Connection {address} was not found in the registry."),
+                ));
             }
             Some(sender) => sender,
         };
@@ -123,14 +119,12 @@ impl NodeManagerWorker {
             flow_control_id: sender.flow_control_id().clone(),
         });
 
-        Response::ok(req.id()).body(status)
+        Ok(Response::ok(req).body(status))
     }
 
-    pub(super) fn get_tcp_listeners(
-        &self,
-        req: &Request,
-        tcp: &TcpTransport,
-    ) -> ResponseBuilder<TransportList> {
+    pub(super) async fn get_tcp_listeners(&self, req: &RequestHeader) -> Response<TransportList> {
+        let tcp_transport = &self.node_manager.tcp_transport;
+
         let map = |info: &TcpListenerInfo| {
             TransportStatus::new(ApiTransport {
                 tt: TransportType::Tcp,
@@ -142,27 +136,29 @@ impl NodeManagerWorker {
             })
         };
 
-        Response::ok(req.id()).body(TransportList::new(
-            tcp.registry().get_all_listeners().iter().map(map).collect(),
+        Response::ok(req).body(TransportList::new(
+            tcp_transport
+                .registry()
+                .get_all_listeners()
+                .iter()
+                .map(map)
+                .collect(),
         ))
     }
 
-    pub(super) fn get_tcp_listener(
+    pub(super) async fn get_tcp_listener(
         &self,
-        req: &Request,
-        tcp: &TcpTransport,
+        req: &RequestHeader,
         address: String,
-    ) -> ResponseBuilder<TransportStatus> {
-        let listener = match Self::find_listener(tcp, address) {
+    ) -> Result<Response<TransportStatus>, Response<Error>> {
+        let tcp_transport = &self.node_manager.tcp_transport;
+
+        let listener = match Self::find_listener(tcp_transport, address.to_string()) {
             None => {
-                return Response::bad_request(req.id()).body(TransportStatus::new(ApiTransport {
-                    tt: TransportType::Tcp,
-                    tm: TransportMode::Listen,
-                    socket_address: "0.0.0.0:0000".parse().unwrap(),
-                    worker_address: "<none>".into(),
-                    processor_address: "<none>".into(),
-                    flow_control_id: FlowControls::generate_id(), // FIXME
-                }));
+                return Err(Response::bad_request(
+                    req,
+                    &format!("Listener {address} was not found in the registry."),
+                ));
             }
             Some(listener) => listener,
         };
@@ -176,16 +172,15 @@ impl NodeManagerWorker {
             flow_control_id: listener.flow_control_id().clone(),
         });
 
-        Response::ok(req.id()).body(status)
+        Ok(Response::ok(req).body(status))
     }
 
     pub(super) async fn create_tcp_connection<'a>(
         &self,
-        req: &Request<'_>,
+        req: &RequestHeader,
         dec: &mut Decoder<'_>,
         ctx: &Context,
-    ) -> Result<ResponseBuilder<TransportStatus>> {
-        let node_manager = self.node_manager.read().await;
+    ) -> Result<Response<TransportStatus>, Response<Error>> {
         let CreateTcpConnection { addr, .. } = dec.decode()?;
 
         info!("Handling request to create a new TCP connection: {}", addr);
@@ -195,15 +190,13 @@ impl NodeManagerWorker {
 
         // Add all Hop workers as consumers for Demo purposes
         // Production nodes should not run any Hop workers
-        for hop in node_manager.registry.hop_services.keys() {
-            ctx.flow_controls().add_consumer(
-                hop.clone(),
-                &options.producer_flow_control_id(),
-                FlowControlPolicy::ProducerAllowMultiple,
-            );
+        for hop in self.node_manager.registry.hop_services.keys().await {
+            ctx.flow_controls()
+                .add_consumer(hop.clone(), &options.flow_control_id());
         }
 
-        let res = node_manager
+        let res = self
+            .node_manager
             .tcp_transport
             .connect(&socket_addr, options)
             .await;
@@ -220,18 +213,14 @@ impl NodeManagerWorker {
                     processor_address: connection.receiver_address().to_string(),
                     flow_control_id: connection.flow_control_id().clone(),
                 };
-                Response::ok(req.id()).body(TransportStatus::new(api_transport))
+                Response::ok(req).body(TransportStatus::new(api_transport))
             }
             Err(msg) => {
                 error!("{}", msg.to_string());
-                Response::bad_request(req.id()).body(TransportStatus::new(ApiTransport {
-                    tt: Tcp,
-                    tm: Outgoing,
-                    socket_address: "0.0.0.0:0000".parse().unwrap(),
-                    worker_address: "<none>".into(),
-                    processor_address: "<none>".into(),
-                    flow_control_id: FlowControls::generate_id(), // FIXME
-                }))
+                return Err(Response::bad_request(
+                    req,
+                    &format!("Unable to connect to {}: {}", addr, msg),
+                ));
             }
         };
 
@@ -240,10 +229,9 @@ impl NodeManagerWorker {
 
     pub(super) async fn create_tcp_listener<'a>(
         &self,
-        req: &Request<'_>,
+        req: &RequestHeader,
         dec: &mut Decoder<'_>,
-    ) -> Result<ResponseBuilder<TransportStatus>> {
-        let node_manager = self.node_manager.read().await;
+    ) -> Result<Response<TransportStatus>, Response<Error>> {
         let CreateTcpListener { addr, .. } = dec.decode()?;
 
         use {super::TransportType::*, TransportMode::*};
@@ -251,7 +239,7 @@ impl NodeManagerWorker {
         info!("Handling request to create a new tcp listener: {}", addr);
 
         let options = TcpListenerOptions::new();
-        let res = node_manager.tcp_transport.listen(&addr, options).await;
+        let res = self.node_manager.tcp_transport.listen(&addr, options).await;
 
         let response = match res {
             Ok(listener) => {
@@ -263,18 +251,14 @@ impl NodeManagerWorker {
                     processor_address: listener.processor_address().to_string(),
                     flow_control_id: listener.flow_control_id().clone(),
                 };
-                Response::ok(req.id()).body(TransportStatus::new(api_transport))
+                Response::ok(req).body(TransportStatus::new(api_transport))
             }
             Err(msg) => {
                 error!("{}", msg.to_string());
-                Response::bad_request(req.id()).body(TransportStatus::new(ApiTransport {
-                    tt: Tcp,
-                    tm: Listen,
-                    socket_address: "0.0.0.0:0000".parse().unwrap(),
-                    worker_address: "<none>".into(),
-                    processor_address: "<none>".into(),
-                    flow_control_id: FlowControls::generate_id(), // FIXME
-                }))
+                return Err(Response::bad_request(
+                    req,
+                    &format!("Unable to listen on {}: {}", addr, msg),
+                ));
             }
         };
 
@@ -283,16 +267,17 @@ impl NodeManagerWorker {
 
     pub(super) async fn delete_tcp_connection(
         &self,
-        req: &Request<'_>,
+        req: &RequestHeader,
         dec: &mut Decoder<'_>,
-    ) -> Result<ResponseBuilder<()>> {
-        let node_manager = self.node_manager.read().await;
+    ) -> Result<Response<()>, Response<Error>> {
         let body: DeleteTransport = dec.decode()?;
+
         info!("Handling request to stop listener: {}", body.address);
 
         let sender_address = match body.address.parse::<SocketAddr>() {
             Ok(socket_address) => {
-                match node_manager
+                match self
+                    .node_manager
                     .tcp_transport
                     .registry()
                     .get_all_sender_workers()
@@ -300,31 +285,45 @@ impl NodeManagerWorker {
                     .find(|x| x.socket_address() == socket_address)
                     .map(|x| x.address().clone())
                 {
-                    None => return Ok(Response::bad_request(req.id())),
+                    None => {
+                        return Err(Response::bad_request(
+                            req,
+                            &format!("Connection {socket_address} was not found in the registry."),
+                        ));
+                    }
                     Some(addr) => addr,
                 }
             }
             Err(_err) => body.address.into(),
         };
 
-        match node_manager.tcp_transport.disconnect(&sender_address).await {
-            Ok(_) => Ok(Response::ok(req.id())),
-            Err(_err) => Ok(Response::bad_request(req.id())),
+        match self
+            .node_manager
+            .tcp_transport
+            .disconnect(sender_address.clone())
+            .await
+        {
+            Ok(_) => Ok(Response::ok(req)),
+            Err(err) => Err(Response::bad_request(
+                req,
+                &format!("Unable to disconnect from {}: {}", sender_address, err),
+            )),
         }
     }
 
     pub(super) async fn delete_tcp_listener(
         &self,
-        req: &Request<'_>,
+        req: &RequestHeader,
         dec: &mut Decoder<'_>,
-    ) -> Result<ResponseBuilder<()>> {
-        let node_manager = self.node_manager.read().await;
+    ) -> Result<Response<()>, Response<Error>> {
         let body: DeleteTransport = dec.decode()?;
+
         info!("Handling request to stop listener: {}", body.address);
 
         let listener_address = match body.address.parse::<SocketAddr>() {
             Ok(socket_address) => {
-                match node_manager
+                match self
+                    .node_manager
                     .tcp_transport
                     .registry()
                     .get_all_listeners()
@@ -332,20 +331,29 @@ impl NodeManagerWorker {
                     .find(|x| x.socket_address() == socket_address)
                     .map(|x| x.address().clone())
                 {
-                    None => return Ok(Response::bad_request(req.id())),
+                    None => {
+                        return Err(Response::bad_request(
+                            req,
+                            &format!("Listener {socket_address} was not found in the registry."),
+                        ));
+                    }
                     Some(addr) => addr,
                 }
             }
             Err(_err) => body.address.into(),
         };
 
-        match node_manager
+        match self
+            .node_manager
             .tcp_transport
             .stop_listener(&listener_address)
             .await
         {
-            Ok(_) => Ok(Response::ok(req.id())),
-            Err(_err) => Ok(Response::bad_request(req.id())),
+            Ok(_) => Ok(Response::ok(req)),
+            Err(err) => Err(Response::bad_request(
+                req,
+                &format!("Unable to stop listener {}: {}", listener_address, err),
+            )),
         }
     }
 }

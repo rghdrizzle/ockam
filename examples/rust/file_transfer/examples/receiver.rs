@@ -1,10 +1,8 @@
 // examples/receiver.rs
 
 use file_transfer::FileData;
-use ockam::access_control::AllowAll;
-use ockam::flow_control::FlowControlPolicy;
 use ockam::identity::SecureChannelListenerOptions;
-use ockam::remote::RemoteForwarderOptions;
+use ockam::remote::RemoteRelayOptions;
 use ockam::{
     errcode::{Kind, Origin},
     node, Context, Error, Result, Routed, TcpConnectionOptions, Worker,
@@ -88,16 +86,11 @@ async fn main(ctx: Context) -> Result<()> {
     let receiver = node.create_identity().await?;
 
     let tcp_options = TcpConnectionOptions::new();
-    let secure_channel_listener_options = SecureChannelListenerOptions::new().as_consumer(
-        &tcp_options.producer_flow_control_id(),
-        FlowControlPolicy::ProducerAllowMultiple,
-    );
+    let secure_channel_listener_options =
+        SecureChannelListenerOptions::new().as_consumer(&tcp_options.flow_control_id());
 
-    node.flow_controls().add_consumer(
-        "receiver",
-        &secure_channel_listener_options.spawner_flow_control_id(),
-        FlowControlPolicy::SpawnerAllowMultipleMessages,
-    );
+    node.flow_controls()
+        .add_consumer("receiver", &secure_channel_listener_options.spawner_flow_control_id());
 
     // Create a secure channel listener for Receiver that will wait for requests to
     // initiate an Authenticated Key Exchange.
@@ -109,21 +102,18 @@ async fn main(ctx: Context) -> Result<()> {
     //
     // To allow Sender and others to initiate an end-to-end secure channel with this program
     // we connect with 1.node.ockam.network:4000 as a TCP client and ask the forwarding
-    // service on that node to create a forwarder for us.
+    // service on that node to create a relay for us.
     //
     // All messages that arrive at that forwarding address will be sent to this program
     // using the TCP connection we created as a client.
     let node_in_hub = tcp.connect("1.node.ockam.network:4000", tcp_options).await?;
-    let forwarder = node
-        .create_forwarder(node_in_hub, RemoteForwarderOptions::new())
-        .await?;
-    println!("\n[✓] RemoteForwarder was created on the node at: 1.node.ockam.network:4000");
+    let relay = node.create_relay(node_in_hub, RemoteRelayOptions::new()).await?;
+    println!("\n[✓] RemoteRelay was created on the node at: 1.node.ockam.network:4000");
     println!("Forwarding address for Receiver is:");
-    println!("{}", forwarder.remote_address());
+    println!("{}", relay.remote_address());
 
     // Start a worker, of type FileReception, at address "receiver".
-    node.start_worker("receiver", FileReception::default(), AllowAll, AllowAll)
-        .await?;
+    node.start_worker("receiver", FileReception::default()).await?;
 
     // We won't call ctx.stop() here, this program will quit when the file will be entirely received
     Ok(())

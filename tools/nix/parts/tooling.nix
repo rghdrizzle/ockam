@@ -12,9 +12,9 @@ _: {
         commitlint
         curl
         git
-        gradle_7
         graphviz
         jq
+        which
       ];
 
       BATS_LIB = "${config.packages.bats}/share/bats";
@@ -24,5 +24,13 @@ _: {
     formatter = pkgs.alejandra;
 
     packages.bats = pkgs.bats.withLibraries (p: [p.bats-assert p.bats-file p.bats-support]);
+
+    packages.shfmt-all = pkgs.writeShellApplication {
+      name = "shfmt-all";
+      runtimeInputs = with pkgs; [findutils gitMinimal shfmt];
+      text = ''
+        git ls-files ':!:./demos/**' '*\.sh' '*\.bash' '*\.bats' | xargs shfmt --diff
+      '';
+    };
   };
 }

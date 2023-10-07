@@ -1,19 +1,23 @@
-mod create;
-mod delete;
-mod list;
-mod show;
-use crate::policy::delete::DeleteCommand;
-use crate::policy::list::ListCommand;
-use crate::policy::show::ShowCommand;
-use crate::{policy::create::CreateCommand, util::Rpc};
-use crate::{CommandGlobalOpts, Result};
 use clap::{Args, Subcommand};
+
 use ockam::Context;
 use ockam_abac::expr::{eq, ident, str};
 use ockam_abac::{Action, Resource};
 use ockam_api::nodes::models::policy::PolicyList;
+use ockam_api::nodes::BackgroundNode;
 use ockam_api::{config::lookup::ProjectLookup, nodes::models::policy::Policy};
 use ockam_core::api::Request;
+
+use crate::policy::create::CreateCommand;
+use crate::policy::delete::DeleteCommand;
+use crate::policy::list::ListCommand;
+use crate::policy::show::ShowCommand;
+use crate::{CommandGlobalOpts, Result};
+
+mod create;
+mod delete;
+mod list;
+mod show;
 
 #[derive(Clone, Debug, Args)]
 pub struct PolicyCommand {
@@ -46,30 +50,32 @@ pub(crate) fn policy_path(r: &Resource, a: &Action) -> String {
 }
 
 pub(crate) async fn has_policy(
-    node: &str,
+    node_name: &str,
     ctx: &Context,
     opts: &CommandGlobalOpts,
     resource: &Resource,
 ) -> Result<bool> {
     let req = Request::get(format!("/policy/{resource}"));
-    let mut rpc = Rpc::background(ctx, opts, node)?;
-    rpc.request(req).await?;
-    let pol: PolicyList = rpc.parse_response()?;
-    Ok(!pol.expressions().is_empty())
+    let node = BackgroundNode::create(ctx, &opts.state, node_name).await?;
+    let policies: PolicyList = node.ask(ctx, req).await?;
+    Ok(!policies.expressions().is_empty())
 }
 
 pub(crate) async fn add_default_project_policy(
-    node: &str,
+    node_name: &str,
     ctx: &Context,
     opts: &CommandGlobalOpts,
     project: ProjectLookup,
     resource: &Resource,
-) -> Result<()> {
-    let expr = eq([ident("subject.project_id"), str(project.id.to_string())]);
+) -> miette::Result<()> {
+    let expr = eq([
+        ident("subject.trust_context_id"),
+        str(project.id.to_string()),
+    ]);
     let bdy = Policy::new(expr);
     let req = Request::post(policy_path(resource, &Action::new("handle_message"))).body(bdy);
 
-    let mut rpc = Rpc::background(ctx, opts, node)?;
-    rpc.request(req).await?;
-    rpc.is_ok()
+    let node = BackgroundNode::create(ctx, &opts.state, node_name).await?;
+    node.tell(ctx, req).await?;
+    Ok(())
 }

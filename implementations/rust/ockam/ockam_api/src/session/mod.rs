@@ -1,18 +1,22 @@
-pub(crate) mod sessions;
-
-use crate::session::sessions::{Key, Ping, Sessions, Status};
-use crate::DefaultAddress;
 use minicbor::{Decode, Encode};
+use tokio::task::JoinHandle;
+use tracing as log;
+
 use ockam::{LocalMessage, Route, TransportMessage, Worker};
 use ockam_core::compat::sync::{Arc, Mutex};
-use ockam_core::flow_control::FlowControlPolicy;
-use ockam_core::{route, Address, AllowAll, Decodable, DenyAll, Encodable, Error, Routed, LOCAL};
-use ockam_node::tokio;
+use ockam_core::{
+    route, Address, AllowAll, AsyncTryClone, Decodable, DenyAll, Encodable, Error, Routed, LOCAL,
+};
 use ockam_node::tokio::sync::mpsc;
 use ockam_node::tokio::task::JoinSet;
 use ockam_node::tokio::time::{sleep, timeout, Duration};
 use ockam_node::Context;
-use tracing as log;
+use ockam_node::{tokio, WorkerBuilder};
+
+use crate::session::sessions::{Key, Ping, Session, Sessions, Status};
+use crate::DefaultAddress;
+
+pub(crate) mod sessions;
 
 const MAX_FAILURES: usize = 3;
 const RETRY_DELAY: Duration = Duration::from_secs(5);
@@ -45,25 +49,33 @@ impl Medic {
         }
     }
 
-    pub fn sessions(&self) -> Arc<Mutex<Sessions>> {
-        self.sessions.clone()
-    }
-
-    pub async fn start(self, ctx: Context) -> Result<(), Error> {
+    pub async fn start(
+        self,
+        ctx: Context,
+    ) -> Result<(JoinHandle<()>, Arc<Mutex<Sessions>>), Error> {
         let ctx = ctx
             .new_detached(Address::random_tagged("Medic.ctx"), DenyAll, AllowAll)
             .await?;
         let (tx, rx) = mpsc::channel(32);
-        ctx.start_worker(Collector::address(), Collector(tx), AllowAll, DenyAll)
+        WorkerBuilder::new(Collector(tx))
+            .with_address(Collector::address())
+            .with_outgoing_access_control(DenyAll)
+            .start(&ctx)
             .await?;
-        self.go(ctx, rx).await
+        let sessions = self.sessions.clone();
+        let handle = tokio::spawn(self.go(ctx, rx));
+        Ok((handle, sessions))
+    }
+
+    pub async fn stop(ctx: &Context) -> Result<(), Error> {
+        ctx.stop_worker(Collector::address()).await
     }
 
     /// Continuously check all sessions.
     ///
     /// This method never returns. It will ping all healthy sessions and
     /// trigger replacements for the unhealthy ones.
-    async fn go(mut self, ctx: Context, mut rx: mpsc::Receiver<Message>) -> ! {
+    async fn go(mut self, ctx: Context, mut rx: mpsc::Receiver<Message>) {
         let ctx = Arc::new(ctx);
         loop {
             log::trace!("check sessions");
@@ -99,11 +111,8 @@ impl Medic {
                                 .find_flow_control_with_producer_address(next)
                                 .map(|x| x.flow_control_id().clone())
                             {
-                                ctx.flow_controls().add_consumer(
-                                    Collector::address(),
-                                    &flow_control_id,
-                                    FlowControlPolicy::ProducerAllowMultiple,
-                                );
+                                ctx.flow_controls()
+                                    .add_consumer(Collector::address(), &flow_control_id);
                             }
                             let t = TransportMessage::v1(echo_route, Collector::address(), v);
                             LocalMessage::new(t, Vec::new())
@@ -118,8 +127,9 @@ impl Medic {
                                 let f = session.replacement(session.ping_route().clone());
                                 session.set_status(Status::Degraded);
                                 log::info!(%key, "replacing session");
+                                let retry_delay = self.retry_delay;
                                 self.replacements.spawn(async move {
-                                    sleep(self.retry_delay).await;
+                                    sleep(retry_delay).await;
                                     (key, f.await)
                                 });
                             }
@@ -172,7 +182,10 @@ impl Medic {
                         }
                     }
                 },
-                else => break
+                else => {
+                    sleep(self.delay).await;
+                    break
+                }
             }
         }
     }
@@ -227,5 +240,138 @@ impl Worker for Collector {
             log::debug!("collector could not send message to medic")
         }
         Ok(())
+    }
+}
+
+pub struct MedicHandle {
+    handle: JoinHandle<()>,
+    sessions: Arc<Mutex<Sessions>>,
+}
+
+impl MedicHandle {
+    pub fn new(handle: JoinHandle<()>, sessions: Arc<Mutex<Sessions>>) -> Self {
+        Self { handle, sessions }
+    }
+
+    pub async fn start_medic(ctx: &Context) -> Result<MedicHandle, Error> {
+        let medic = Medic::new();
+        let ctx = ctx.async_try_clone().await?;
+        let (handle, sessions) = medic.start(ctx).await?;
+        let medic_handle = Self::new(handle, sessions);
+        Ok(medic_handle)
+    }
+
+    pub async fn stop_medic(&self, ctx: &Context) -> Result<(), Error> {
+        Medic::stop(ctx).await?;
+        self.handle.abort();
+        Ok(())
+    }
+
+    pub fn add_session(&self, session: Session) -> Key {
+        let mut sessions = self.sessions.lock().unwrap();
+        sessions.add(session)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use core::sync::atomic::{AtomicBool, Ordering};
+
+    use tracing as log;
+
+    use ockam::{route, Address, Context};
+    use ockam_core::compat::sync::Arc;
+    use ockam_core::{AsyncTryClone, Result};
+
+    use crate::echoer::Echoer;
+    use crate::hop::Hop;
+    use crate::session::sessions::Session;
+    use crate::session::sessions::Status;
+    use crate::session::Medic;
+
+    #[ockam::test]
+    async fn test_session_monitoring(ctx: &mut Context) -> Result<()> {
+        // Create a new Medic instance
+        let medic = Medic::new();
+
+        // Start the Medic in a separate task
+        let new_ctx = ctx.async_try_clone().await?;
+
+        let (medic_task, sessions) = medic.start(new_ctx).await?;
+
+        // Medic relies on echo to verify if a session is alive
+        ctx.start_worker(Address::from_string("echo"), Echoer)
+            .await?;
+
+        // Hop serves as simple neutral address we can use
+        ctx.start_worker(Address::from_string("hop"), Hop).await?;
+
+        let replacer_called = Arc::new(AtomicBool::new(false));
+        let replacer_can_return = Arc::new(AtomicBool::new(false));
+
+        {
+            let mut session = Session::new(route!["broken_route"]);
+            let replacer_called = replacer_called.clone();
+            let replacer_can_return = replacer_can_return.clone();
+            session.set_replacer(Box::new(move |_| {
+                let replacer_called = replacer_called.clone();
+                let replacer_can_return = replacer_can_return.clone();
+                Box::pin(async move {
+                    log::info!("replacer called");
+                    replacer_called.store(true, Ordering::Release);
+                    while !replacer_can_return.load(Ordering::Acquire) {
+                        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+                    }
+                    // en empty route would do the trick, but a hop is more realistic
+                    Ok(route!["hop"])
+                })
+            }));
+
+            sessions.lock().unwrap().add(session);
+        }
+
+        {
+            // Initially it's up
+            let mut guard = sessions.lock().unwrap();
+            let (_, session) = guard.iter_mut().next().unwrap();
+            assert_eq!(session.status(), Status::Up);
+            assert_eq!(session.ping_route(), &route!["broken_route"]);
+        }
+
+        // Since the route is broken eventually it will be degraded and will call the replacer
+        while !replacer_called.load(Ordering::Acquire) {
+            tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+        }
+
+        {
+            // Check the session is now marked as degraded
+            let guard = sessions.lock().unwrap();
+            let (_, session) = guard.iter().next().unwrap();
+            assert_eq!(session.status(), Status::Degraded);
+            assert_eq!(session.ping_route(), &route!["broken_route"]);
+        }
+
+        // Now we allow the replacer to return and replace the route
+        replacer_can_return.store(true, Ordering::Release);
+
+        loop {
+            {
+                // Check that the session is now up, since we don't have any
+                // synchronization we keep to keep checking until it's up
+                let guard = sessions.lock().unwrap();
+                let (_, session) = guard.iter().next().unwrap();
+                if session.status() == Status::Up {
+                    assert_eq!(session.ping_route(), &route!["hop"]);
+                    break;
+                }
+            }
+
+            tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+            continue;
+        }
+
+        // Shut down the test
+        medic_task.abort();
+        ctx.stop().await
     }
 }

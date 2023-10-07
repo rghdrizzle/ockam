@@ -1,10 +1,10 @@
 use crate::util::node_rpc;
-use crate::{docs, CommandGlobalOpts};
-use anyhow::anyhow;
+use crate::{docs, fmt_ok, CommandGlobalOpts};
 use clap::Args;
+use colorful::Colorful;
+
 use ockam::Context;
 use ockam_api::cli_state::traits::StateDirTrait;
-use ockam_api::cli_state::CliStateError;
 
 const LONG_ABOUT: &str = include_str!("./static/delete/long_about.txt");
 const AFTER_LONG_HELP: &str = include_str!("./static/delete/after_long_help.txt");
@@ -19,6 +19,10 @@ after_long_help = docs::after_help(AFTER_LONG_HELP)
 pub struct DeleteCommand {
     /// Name of the identity to be deleted
     name: String,
+
+    /// Confirm the deletion without prompting
+    #[arg(display_order = 901, long, short)]
+    yes: bool,
 }
 
 impl DeleteCommand {
@@ -30,20 +34,23 @@ impl DeleteCommand {
 async fn run_impl(
     _ctx: Context,
     (opts, cmd): (CommandGlobalOpts, DeleteCommand),
-) -> crate::Result<()> {
+) -> miette::Result<()> {
     let state = opts.state;
-    // Check if exists
-    match state.identities.get(&cmd.name) {
-        // If it exists, proceed
-        Ok(identity_state) => {
-            state.delete_identity(identity_state)?;
-            println!("Identity '{}' deleted", cmd.name);
-            Ok(())
-        }
-        // Return the appropriate error
-        Err(err) => match err {
-            CliStateError::NotFound => Err(anyhow!("Identity '{}' not found", &cmd.name).into()),
-            _ => Err(err.into()),
-        },
+    let idt = state.identities.get(&cmd.name)?;
+    if opts
+        .terminal
+        .confirmed_with_flag_or_prompt(cmd.yes, "Are you sure you want to delete this identity?")?
+    {
+        state.delete_identity(idt)?;
+        opts.terminal
+            .stdout()
+            .plain(fmt_ok!(
+                "The identity named '{}' has been deleted",
+                &cmd.name
+            ))
+            .machine(&cmd.name)
+            .json(serde_json::json!({ "name": &cmd.name }))
+            .write_line()?;
     }
+    Ok(())
 }

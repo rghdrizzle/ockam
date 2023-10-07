@@ -3,6 +3,7 @@ defmodule Ockam.Healthcheck do
   Healthcheck implementation
   """
 
+  alias Ockam.Healthcheck.APIEndpointTarget
   alias Ockam.Healthcheck.Target
   alias Ockam.Message
   alias Ockam.SecureChannel
@@ -12,19 +13,26 @@ defmodule Ockam.Healthcheck do
 
   @key_exchange_timeout 10_000
 
-  def check_targets() do
-    targets = Application.get_env(:ockam_healthcheck, :targets, [])
-    ## TODO: parallel check for multiple targets
-    Enum.each(targets, &Ockam.Healthcheck.check_target/1)
-  end
+  def check_target(target, timeout \\ 5000)
 
-  def check_target(
-        %Target{} = target,
-        timeout \\ 5000
-      ) do
+  def check_target(%Target{} = target, timeout) do
     start_time = System.monotonic_time(:millisecond)
 
     case ping_target(target, timeout) do
+      :ok ->
+        report_check_ok(target, start_time)
+        :ok
+
+      {:error, reason} ->
+        report_check_failed(target, reason, start_time)
+        {:error, reason}
+    end
+  end
+
+  def check_target(%APIEndpointTarget{} = target, timeout) do
+    start_time = System.monotonic_time(:millisecond)
+
+    case check_api_endpoint(target, timeout) do
       :ok ->
         report_check_ok(target, start_time)
         :ok
@@ -63,6 +71,39 @@ defmodule Ockam.Healthcheck do
         Ockam.Node.unregister_address(me)
 
         result
+      end)
+    end)
+  end
+
+  def check_api_endpoint(target, timeout) do
+    %{
+      host: host,
+      path: path,
+      method: method,
+      body: body,
+      port: port,
+      api_worker: api_worker,
+      healthcheck_worker: healthcheck_worker
+    } = target
+
+    with_tcp(host, port, fn conn ->
+      with_channel(conn, api_worker, fn channel ->
+        case Ockam.API.Client.sync_request(
+               method,
+               path,
+               body,
+               [channel, healthcheck_worker],
+               timeout
+             ) do
+          {:ok, %{status: status}} when status < 300 ->
+            :ok
+
+          {:ok, %{status: status, body: body}} ->
+            {:error, {status, body}}
+
+          {:error, _reason} = error ->
+            error
+        end
       end)
     end)
   end
@@ -119,14 +160,12 @@ defmodule Ockam.Healthcheck do
   defp connect_secure_channel(tcp_conn, api_worker) do
     api_route = [tcp_conn, api_worker]
 
-    with {:ok, identity, vault_name} <- get_healthcheck_identity() do
-      Logger.debug("Identity: #{inspect(identity)}")
-
+    with {:ok, {identity, keypair, attestation}} <- get_healthcheck_identity() do
       case SecureChannel.create_channel(
              [
                route: api_route,
                identity: identity,
-               vault_name: vault_name
+               encryption_options: [static_keypair: keypair, static_key_attestation: attestation]
              ],
              ## TODO: make this configurable
              @key_exchange_timeout
@@ -150,18 +189,26 @@ defmodule Ockam.Healthcheck do
     end
   end
 
-  defp log_healthcheck(message, duration, target) do
-    Logger.debug(
-      message <>
-        " for target #{inspect(target)} " <>
-        "duration: #{inspect(duration)}"
-    )
+  defp log_healthcheck_ok(duration, target) do
+    log_message = log_message("Healthcheck OK", duration, target)
+    Logger.debug(log_message)
+  end
+
+  defp log_healthcheck_error(reason, duration, target) do
+    log_message = log_message("Healthcheck ERROR: #{inspect(reason)}", duration, target)
+    Logger.warning(log_message)
+  end
+
+  defp log_message(message, duration, target) do
+    message <>
+      " for target #{inspect(target)} " <>
+      "duration: #{inspect(duration)}"
   end
 
   def report_check_ok(target, start_time) do
     duration = System.monotonic_time(:millisecond) - start_time
 
-    log_healthcheck("Healthcheck OK", duration, target)
+    log_healthcheck_ok(duration, target)
 
     Telemetry.emit_event([:healthcheck, :result],
       measurements: %{status: 1},
@@ -181,11 +228,7 @@ defmodule Ockam.Healthcheck do
   def report_check_failed(target, reason, start_time) do
     duration = System.monotonic_time(:millisecond) - start_time
 
-    log_healthcheck(
-      "Healthcheck ERROR: #{inspect(reason)}",
-      duration,
-      target
-    )
+    log_healthcheck_error(reason, duration, target)
 
     Telemetry.emit_event([:healthcheck, :result],
       measurements: %{status: 0},
@@ -204,19 +247,21 @@ defmodule Ockam.Healthcheck do
   end
 
   @spec get_healthcheck_identity() ::
-          {:ok, identity :: Ockam.Identity.t(), vault_name :: binary() | nil}
+          {:ok,
+           {identity :: Ockam.Identity.t(), keypair :: map(),
+            attestation :: Ockam.Identity.PurposeKeyAttestation.t()}}
           | {:error, reason :: any()}
   defp get_healthcheck_identity() do
     case Application.get_env(:ockam_healthcheck, :identity_source) do
       :function ->
-        function =
-          Application.get_env(:ockam_healthcheck, :identity_function, &generate_identity/0)
+        function = Application.get_env(:ockam_healthcheck, :identity_function, &get_identity/0)
 
         identity_from_function(function)
 
       :file ->
         file = Application.get_env(:ockam_healthcheck, :identity_file)
-        identity_from_file(file)
+        secret = Application.get_env(:ockam_healthcheck, :identity_signing_key_file)
+        identity_from_file(file, secret)
     end
   end
 
@@ -228,21 +273,38 @@ defmodule Ockam.Healthcheck do
     {:error, {:invalid_identity_function, not_function}}
   end
 
-  defp identity_from_file(file) do
-    case File.read(file) do
-      {:ok, data} ->
-        with {:ok, identity} <- Ockam.Identity.make_identity(data) do
-          {:ok, identity, nil}
-        end
-
-      {:error, reason} ->
-        {:error, reason}
+  defp identity_from_file(file, secret) do
+    with {:ok, identity_data} <- File.read(file),
+         {:ok, signing_key} <- File.read(secret),
+         {:ok, identity, _identity_id} <- Ockam.Identity.import(identity_data, signing_key),
+         {:ok, keypair} <- SecureChannel.Crypto.generate_dh_keypair(),
+         {:ok, attestation} <- Ockam.Identity.attest_purpose_key(identity, keypair) do
+      {:ok, {identity, keypair, attestation}}
     end
   end
 
-  def generate_identity() do
+  def get_identity() do
+    case :persistent_term.get(:healthcheck_identity, :none) do
+      :none ->
+        generate_and_cache_identity()
+
+      {identity, keypair, attestation} ->
+        {:ok, {identity, keypair, attestation}}
+    end
+  end
+
+  defp generate_and_cache_identity() do
+    with {:ok, identity} <- generate_identity(),
+         {:ok, keypair} <- SecureChannel.Crypto.generate_dh_keypair(),
+         {:ok, attestation} <- Ockam.Identity.attest_purpose_key(identity, keypair) do
+      :persistent_term.put(:healthcheck_identity, {identity, keypair, attestation})
+      {:ok, {identity, keypair, attestation}}
+    end
+  end
+
+  defp generate_identity() do
     with {:ok, identity, _identity_id} <- Ockam.Identity.create() do
-      {:ok, identity, nil}
+      {:ok, identity}
     end
   end
 end

@@ -1,32 +1,35 @@
-use crate::node::util::init_node_state;
 use crate::node::util::run_ockam;
-use crate::util::node_rpc;
 use crate::util::{embedded_node_that_is_not_stopped, exitcode};
+use crate::util::{local_cmd, node_rpc};
 use crate::{docs, identity, CommandGlobalOpts, Result};
-use anyhow::{anyhow, Context as _};
 use clap::{ArgGroup, Args};
+use miette::Context as _;
+use miette::{miette, IntoDiagnostic};
+use ockam::identity::{AttributesEntry, Identifier};
 use ockam::Context;
+use ockam_api::authority_node;
+use ockam_api::authority_node::{OktaConfiguration, TrustedIdentity};
 use ockam_api::bootstrapped_identities_store::PreTrustedIdentities;
+use ockam_api::cli_state::init_node_state;
 use ockam_api::cli_state::traits::{StateDirTrait, StateItemTrait};
-use ockam_api::nodes::authority_node;
-use ockam_api::nodes::authority_node::{OktaConfiguration, TrustedIdentity};
 use ockam_api::nodes::models::transport::{CreateTransportJson, TransportMode, TransportType};
 use ockam_api::DefaultAddress;
 use ockam_core::compat::collections::HashMap;
 use ockam_core::compat::fmt;
-use ockam_identity::{AttributesEntry, IdentityIdentifier};
 use serde::{Deserialize, Serialize};
 use std::fmt::{Display, Formatter};
 use std::path::PathBuf;
-use tracing::{debug, error};
+use tracing::debug;
 
 const LONG_ABOUT: &str = include_str!("./static/create/long_about.txt");
+const PREVIEW_TAG: &str = include_str!("../static/preview_tag.txt");
 const AFTER_LONG_HELP: &str = include_str!("./static/create/after_long_help.txt");
 
 /// Create an Authority node
 #[derive(Clone, Debug, Args)]
 #[command(
-    long_about = docs::after_help(LONG_ABOUT),
+    long_about = docs::about(LONG_ABOUT),
+    before_help = docs::before_help(PREVIEW_TAG),
     after_long_help = docs::after_help(AFTER_LONG_HELP),
 )]
 #[clap(group(ArgGroup::new("trusted").required(true).args(& ["trusted_identities", "reload_from_trusted_identities_file"])))]
@@ -49,6 +52,10 @@ pub struct CreateCommand {
     )]
     tcp_listener_address: String,
 
+    /// `authority create` started a child process to run this node in foreground.
+    #[arg(long, hide = true)]
+    pub child_process: bool,
+
     /// Set this option if the authority node should not support the enrollment
     /// of new project members
     #[arg(long, value_name = "BOOL", default_value_t = false)]
@@ -56,7 +63,7 @@ pub struct CreateCommand {
 
     /// Set this option if the authority node should not support
     /// the issuing of enrollment tokens
-    #[arg(long, value_name = "BOOL", default_value_t = false)]
+    #[arg(long, default_value_t = false)]
     no_token_enrollment: bool,
 
     /// List of the trusted identities, and corresponding attributes to be preload in the attributes storage.
@@ -69,15 +76,15 @@ pub struct CreateCommand {
     #[arg(group = "trusted", long, value_name = "PATH")]
     reload_from_trusted_identities_file: Option<PathBuf>,
 
-    /// Okta: URL used for accessing the Okta API (optional)
+    /// Okta: URL used for accessing the Okta API
     #[arg(long, value_name = "URL", default_value = None)]
     tenant_base_url: Option<String>,
 
-    /// Okta: pem certificate used to access the Okta server (optional)
+    /// Okta: pem certificate used to access the Okta server
     #[arg(long, value_name = "STRING", default_value = None)]
     certificate: Option<String>,
 
-    /// Okta: name of the attributes which can be retrieved from Okta (optional)
+    /// Okta: name of the attributes which can be retrieved from Okta
     #[arg(long, value_name = "ATTRIBUTE_NAMES", default_value = None)]
     attributes: Option<Vec<String>>,
 
@@ -89,17 +96,20 @@ pub struct CreateCommand {
     #[arg(long = "vault", value_name = "VAULT")]
     vault: Option<String>,
 
-    /// Authority Identity
-    #[arg(long = "identity", value_name = "IDENTITY")]
+    /// Name of the Identity that the authority will use
+    #[arg(long = "identity", value_name = "IDENTITY_NAME")]
     identity: Option<String>,
 }
 
 /// Start an authority node by calling the `ockam` executable with the current command-line
 /// arguments
-async fn spawn_background_node(opts: &CommandGlobalOpts, cmd: &CreateCommand) -> crate::Result<()> {
+async fn spawn_background_node(
+    opts: &CommandGlobalOpts,
+    cmd: &CreateCommand,
+) -> miette::Result<()> {
     // Create node state, including the vault and identity if they don't exist
     init_node_state(
-        opts,
+        &opts.state,
         &cmd.node_name,
         cmd.vault.as_deref(),
         cmd.identity.as_deref(),
@@ -109,6 +119,10 @@ async fn spawn_background_node(opts: &CommandGlobalOpts, cmd: &CreateCommand) ->
     // Construct the arguments list and re-execute the ockam
     // CLI in foreground mode to start the newly created node
     let mut args = vec![
+        match opts.global_args.verbose {
+            0 => "-vv".to_string(),
+            v => format!("-{}", "v".repeat(v as usize)),
+        },
         "authority".to_string(),
         "create".to_string(),
         "--project-identifier".to_string(),
@@ -116,12 +130,12 @@ async fn spawn_background_node(opts: &CommandGlobalOpts, cmd: &CreateCommand) ->
         "--tcp-listener-address".to_string(),
         cmd.tcp_listener_address.clone(),
         "--foreground".to_string(),
-        match opts.global_args.verbose {
-            0 => "-vv".to_string(),
-            v => format!("-{}", "v".repeat(v as usize)),
-        },
-        "--no-color".to_string(),
+        "--child-process".to_string(),
     ];
+
+    if cmd.logging_to_file() || !opts.terminal.is_tty() {
+        args.push("--no-color".to_string());
+    }
 
     if cmd.no_direct_authentication {
         args.push("--no-direct-authentication".to_string());
@@ -173,19 +187,17 @@ async fn spawn_background_node(opts: &CommandGlobalOpts, cmd: &CreateCommand) ->
     }
     args.push(cmd.node_name.to_string());
 
-    run_ockam(opts, &cmd.node_name, args)
+    run_ockam(opts, &cmd.node_name, args, cmd.logging_to_file())
 }
 
 impl CreateCommand {
     pub fn run(self, options: CommandGlobalOpts) {
         if self.foreground {
             // Create a new node in the foreground (i.e. in this OS process)
-            if let Err(e) = embedded_node_that_is_not_stopped(start_authority_node, (options, self))
-            {
-                error!(%e);
-                eprintln!("{e:?}");
-                std::process::exit(e.code());
-            }
+            local_cmd(embedded_node_that_is_not_stopped(
+                start_authority_node,
+                (options, self),
+            ))
         } else {
             // Create a new node running in the background (i.e. another, new OS process)
             node_rpc(create_background_node, (options, self))
@@ -197,7 +209,7 @@ impl CreateCommand {
     /// or an explicit list of identities passed on the command line
     pub(crate) fn trusted_identities(
         &self,
-        authority_identifier: &IdentityIdentifier,
+        authority_identifier: &Identifier,
     ) -> Result<PreTrustedIdentities> {
         match (
             &self.reload_from_trusted_identities_file,
@@ -210,8 +222,20 @@ impl CreateCommand {
             ))),
             _ => Err(crate::Error::new(
                 exitcode::CONFIG,
-                anyhow!("Exactly one of 'reload-from-trusted-identities-file' or 'trusted-identities' must be defined"),
+                miette!("Exactly one of 'reload-from-trusted-identities-file' or 'trusted-identities' must be defined"),
             )),
+        }
+    }
+
+    pub fn logging_to_file(&self) -> bool {
+        // Background nodes will spawn a foreground node in a child process.
+        // In that case, the child process will log to files.
+        if self.child_process {
+            true
+        }
+        // The main process will log to stdout only if it's a foreground node.
+        else {
+            !self.foreground
         }
     }
 }
@@ -220,7 +244,7 @@ impl CreateCommand {
 async fn create_background_node(
     _ctx: Context,
     (opts, cmd): (CommandGlobalOpts, CreateCommand),
-) -> crate::Result<()> {
+) -> miette::Result<()> {
     // Spawn node in another, new process
     spawn_background_node(&opts, &cmd).await
 }
@@ -232,13 +256,13 @@ async fn create_background_node(
 async fn start_authority_node(
     ctx: Context,
     args: (CommandGlobalOpts, CreateCommand),
-) -> crate::Result<()> {
+) -> miette::Result<()> {
     let (opts, cmd) = args;
 
     // Create node state, including the vault and identity if they don't exist
     if !opts.state.nodes.exists(&cmd.node_name) {
         init_node_state(
-            &opts,
+            &opts.state,
             &cmd.node_name,
             cmd.vault.as_deref(),
             cmd.identity.as_deref(),
@@ -264,7 +288,7 @@ async fn start_authority_node(
                 Ok(state) => state.config().identifier(),
                 Err(_) => {
                     debug!("creating default identity");
-                    let cmd = identity::CreateCommand::new("authority".into(), None);
+                    let cmd = identity::CreateCommand::new("authority".into(), None, None);
                     cmd.create_identity(opts.clone()).await?
                 }
             }
@@ -294,11 +318,14 @@ async fn start_authority_node(
             .setup_mut()
             .set_verbose(opts.global_args.verbose)
             .set_authority_node()
-            .add_transport(CreateTransportJson::new(
-                TransportType::Tcp,
-                TransportMode::Listen,
-                cmd.tcp_listener_address.as_str(),
-            )?),
+            .set_api_transport(
+                CreateTransportJson::new(
+                    TransportType::Tcp,
+                    TransportMode::Listen,
+                    cmd.tcp_listener_address.as_str(),
+                )
+                .into_diagnostic()?,
+            ),
     )?;
 
     let trusted_identities = cmd.trusted_identities(&identifier)?;
@@ -307,8 +334,7 @@ async fn start_authority_node(
         identifier,
         storage_path: opts.state.identities.identities_repository_path()?,
         vault_path: opts.state.vaults.default()?.vault_file_path().clone(),
-        project_identifier: cmd.project_identifier.clone(),
-        trust_context_identifier: cmd.project_identifier,
+        project_identifier: cmd.project_identifier,
         tcp_listener_address: cmd.tcp_listener_address,
         secure_channel_listener_name: None,
         authenticator_name: None,
@@ -317,7 +343,9 @@ async fn start_authority_node(
         no_token_enrollment: cmd.no_token_enrollment,
         okta: okta_configuration,
     };
-    authority_node::start_node(&ctx, &configuration).await?;
+    authority_node::start_node(&ctx, &configuration)
+        .await
+        .into_diagnostic()?;
 
     Ok(())
 }
@@ -327,7 +355,7 @@ fn parse_trusted_identities(values: &str) -> Result<TrustedIdentities> {
     serde_json::from_str::<TrustedIdentities>(values).map_err(|e| {
         crate::Error::new(
             exitcode::CONFIG,
-            anyhow!("Cannot parse the trusted identities: {e}"),
+            miette!("Cannot parse the trusted identities: {}", e),
         )
     })
 }
@@ -335,41 +363,35 @@ fn parse_trusted_identities(values: &str) -> Result<TrustedIdentities> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use ockam::identity::Identifier;
     use ockam_core::compat::collections::HashMap;
-    use ockam_identity::IdentityIdentifier;
 
     #[test]
     fn test_parse_trusted_identities() {
-        let identity1 = IdentityIdentifier::from_hex(
-            "e86be15e83d1c93e24dd1967010b01b6df491b459725fd9ae0bebfd7c1bf8ea3",
-        );
-        let identity2 = IdentityIdentifier::from_hex(
-            "6c20e814b56579306f55c64e8747e6c1b4a53d9a3f4ca83c252cc2fbfc72fa94",
-        );
+        let identity1 = Identifier::try_from("Ie86be15e83d1c93e24dd1967010b01b6df491b45").unwrap();
+        let identity2 = Identifier::try_from("I6c20e814b56579306f55c64e8747e6c1b4a53d9a").unwrap();
 
-        let trusted = format!("{{\"{identity1}\": {{\"name\": \"value\", \"project_id\": \"1\", \"trust_context_id\": \"1\"}}, \"{identity2}\": {{\"project_id\" : \"1\", \"trust_context_id\" : \"1\", \"ockam-role\" : \"enroller\"}}}}");
+        let trusted = format!("{{\"{identity1}\": {{\"name\": \"value\", \"trust_context_id\": \"1\"}}, \"{identity2}\": {{\"trust_context_id\" : \"1\", \"ockam-role\" : \"enroller\"}}}}");
         let actual = parse_trusted_identities(trusted.as_str()).unwrap();
 
         let attributes1 = HashMap::from([
             ("name".into(), "value".into()),
-            ("project_id".into(), "1".into()),
             ("trust_context_id".into(), "1".into()),
         ]);
         let attributes2 = HashMap::from([
-            ("project_id".into(), "1".into()),
             ("trust_context_id".into(), "1".into()),
             ("ockam-role".into(), "enroller".into()),
         ]);
         let expected = vec![
-            TrustedIdentity::new(&identity1, &attributes1),
             TrustedIdentity::new(&identity2, &attributes2),
+            TrustedIdentity::new(&identity1, &attributes1),
         ];
         assert_eq!(actual.trusted_identities(), expected);
     }
 }
 
 #[derive(Debug, PartialEq, Eq, Clone, Serialize, Deserialize)]
-struct TrustedIdentities(HashMap<IdentityIdentifier, HashMap<String, String>>);
+struct TrustedIdentities(HashMap<Identifier, HashMap<String, String>>);
 
 impl TrustedIdentities {
     pub fn trusted_identities(&self) -> Vec<TrustedIdentity> {
@@ -379,14 +401,14 @@ impl TrustedIdentities {
             .collect()
     }
 
-    /// Return a map from IdentityIdentifier to AttributesEntry and:
+    /// Return a map from Identifier to AttributesEntry and:
     ///   - add the project identifier as an attribute
     ///   - use the authority identifier an the attributes issuer
     pub(crate) fn to_map(
         &self,
         project_identifier: String,
-        authority_identifier: &IdentityIdentifier,
-    ) -> HashMap<IdentityIdentifier, AttributesEntry> {
+        authority_identifier: &Identifier,
+    ) -> HashMap<Identifier, AttributesEntry> {
         HashMap::from_iter(self.trusted_identities().iter().map(|t| {
             (
                 t.identifier(),

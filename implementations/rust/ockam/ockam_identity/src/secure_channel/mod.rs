@@ -2,42 +2,37 @@
 pub mod access_control;
 mod addresses;
 mod api;
-mod common;
-mod completer;
 mod decryptor;
-mod decryptor_worker;
 mod encryptor;
 mod encryptor_worker;
-mod initiator_state;
-pub(crate) mod initiator_worker;
-mod key_exchange_with_payload;
+mod handshake;
+mod key_tracker;
 mod listener;
 mod local_info;
 mod nonce_tracker;
 mod options;
-mod packets;
 mod registry;
-mod responder_state;
-mod responder_worker;
+mod role;
 /// List of trust policies to setup ABAC controls
 pub mod trust_policy;
 
 pub use access_control::*;
 pub(crate) use addresses::*;
 pub use api::*;
-pub(crate) use common::*;
-// pub(crate) use decryptor_worker::*;
+pub(crate) use handshake::*;
 pub(crate) use listener::*;
 pub use local_info::*;
 pub use options::*;
 pub use registry::*;
+pub(crate) use role::*;
 pub use trust_policy::*;
 
 #[cfg(test)]
 mod tests {
     use crate::secure_channel::{decryptor::Decryptor, encryptor::Encryptor};
+    use ockam_core::compat::rand::RngCore;
     use ockam_core::Result;
-    use ockam_vault::{EphemeralSecretsStore, SecretAttributes, Vault};
+    use ockam_vault::{SoftwareVaultForSecureChannels, VaultForSecureChannels};
     use rand::seq::SliceRandom;
     use rand::thread_rng;
 
@@ -118,7 +113,7 @@ mod tests {
             let ciphertext = encryptor.encrypt(&msg).await.unwrap();
             let mut trash_packet = ciphertext.clone();
             // toggle a bit, to make the packet invalid.  The nonce is not affected
-            // as it at the beggining of the packet
+            // as it at the beginning of the packet
             trash_packet[ciphertext.len() - 1] ^= 0b1000_0000;
 
             // Generate a packet with some lookinly-valid content, but a nonce
@@ -137,20 +132,18 @@ mod tests {
     }
 
     async fn create_encryptor_decryptor() -> Result<(Encryptor, Decryptor)> {
-        let vault1 = Vault::create();
-        let vault2 = Vault::create();
+        let vault1 = SoftwareVaultForSecureChannels::create();
+        let vault2 = SoftwareVaultForSecureChannels::create();
 
-        let secret_attrs = SecretAttributes::Aes256;
-        let key_on_v1 = vault1.create_ephemeral_secret(secret_attrs).await.unwrap();
-        let secret = vault1
-            .get_ephemeral_secret(&key_on_v1, "secret")
-            .await
-            .unwrap();
+        let mut rng = thread_rng();
+        let mut key = [0u8; 32];
+        rng.fill_bytes(&mut key);
 
-        let key_on_v2 = vault2
-            .import_ephemeral_secret(secret.secret().clone(), secret_attrs)
-            .await
-            .unwrap();
+        let key_on_v1 = vault1.import_secret_buffer(key.to_vec()).await?;
+        let key_on_v1 = vault1.convert_secret_buffer_to_aead_key(key_on_v1).await?;
+
+        let key_on_v2 = vault2.import_secret_buffer(key.to_vec()).await?;
+        let key_on_v2 = vault2.convert_secret_buffer_to_aead_key(key_on_v2).await?;
 
         Ok((
             Encryptor::new(key_on_v1, 0, vault1),

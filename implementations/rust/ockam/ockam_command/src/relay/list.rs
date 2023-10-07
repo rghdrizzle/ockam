@@ -1,63 +1,90 @@
-use anyhow::anyhow;
 use clap::Args;
+use colorful::Colorful;
+use miette::{miette, IntoDiagnostic};
+use tokio::sync::Mutex;
+use tokio::try_join;
+use tracing::trace;
 
 use ockam::Context;
-use ockam_api::nodes::models::forwarder::ForwarderInfo;
+use ockam_api::address::extract_address_value;
+use ockam_api::cli_state::StateDirTrait;
+use ockam_api::nodes::models::relay::RelayInfo;
+use ockam_api::nodes::BackgroundNode;
 use ockam_core::api::Request;
 
-use crate::node::get_node_name;
-use crate::util::{exitcode, extract_address_value, node_rpc, Rpc};
-use crate::{docs, CommandGlobalOpts, Result};
+use crate::node::{get_node_name, initialize_node_if_default};
+use crate::terminal::OckamColor;
+use crate::util::node_rpc;
+use crate::{docs, CommandGlobalOpts};
 
+const PREVIEW_TAG: &str = include_str!("../static/preview_tag.txt");
 const AFTER_LONG_HELP: &str = include_str!("./static/list/after_long_help.txt");
 
 /// List Relays
 #[derive(Clone, Debug, Args)]
 #[command(
     arg_required_else_help = false,
+    before_help = docs::before_help(PREVIEW_TAG),
     after_long_help = docs::after_help(AFTER_LONG_HELP)
 )]
 pub struct ListCommand {
-    /// Node to list relays from
+    ///  List all the relays relaying traffic to the specified node
     #[arg(global = true, long, value_name = "NODE")]
-    pub at: Option<String>,
+    pub to: Option<String>,
 }
 
 impl ListCommand {
     pub fn run(self, options: CommandGlobalOpts) {
+        initialize_node_if_default(&options, &self.to);
         node_rpc(run_impl, (options, self));
     }
 }
 
-async fn run_impl(ctx: Context, (opts, cmd): (CommandGlobalOpts, ListCommand)) -> Result<()> {
-    let at = get_node_name(&opts.state, &cmd.at);
-    let node_name = extract_address_value(&at)?;
-    let mut rpc = Rpc::background(&ctx, &opts, &node_name)?;
-    rpc.request(Request::get("/node/forwarder")).await?;
-    let response = rpc.parse_response::<Vec<ForwarderInfo>>()?;
+async fn run_impl(
+    ctx: Context,
+    (opts, cmd): (CommandGlobalOpts, ListCommand),
+) -> miette::Result<()> {
+    let to = get_node_name(&opts.state, &cmd.to);
+    let node_name = extract_address_value(&to)?;
 
-    if response.is_empty() {
-        return Err(crate::Error::new(
-            exitcode::IOERR,
-            anyhow!("No relays found on node {node_name}"),
-        ));
+    if !opts.state.nodes.get(&node_name)?.is_running() {
+        return Err(miette!("The node '{}' is not running", node_name));
     }
 
-    // TODO: Switch to the table?
-    for relay_info in response.iter() {
-        println!("Relay:");
-        println!("  Relay Route: {}", relay_info.forwarding_route());
-        println!("  Remote Address: {}", relay_info.remote_address_ma()?);
-        println!("  Worker Address: {}", relay_info.worker_address_ma()?);
-        println!(
-            "  Flow Control Id: {}",
-            relay_info
-                .flow_control_id()
-                .as_ref()
-                .map(|x| x.to_string())
-                .unwrap_or("<none>".into())
-        );
-    }
+    let node = BackgroundNode::create(&ctx, &opts.state, &node_name).await?;
+    let is_finished: Mutex<bool> = Mutex::new(false);
 
+    let get_relays = async {
+        let relay_infos: Vec<RelayInfo> = node.ask(&ctx, Request::get("/node/forwarder")).await?;
+        *is_finished.lock().await = true;
+        Ok(relay_infos)
+    };
+
+    let output_messages = vec![format!(
+        "Listing Relays on {}...\n",
+        node_name
+            .to_string()
+            .color(OckamColor::PrimaryResource.color())
+    )];
+
+    let progress_output = opts
+        .terminal
+        .progress_output(&output_messages, &is_finished);
+
+    let (relays, _) = try_join!(get_relays, progress_output)?;
+    trace!(?relays, "Relays retrieved");
+
+    let plain = opts.terminal.build_list(
+        &relays,
+        &format!("Relays on Node {node_name}"),
+        &format!("No Relays found on node {node_name}."),
+    )?;
+    let json = serde_json::to_string_pretty(&relays).into_diagnostic()?;
+
+    opts.terminal
+        .stdout()
+        .plain(plain)
+        .json(json)
+        .write_line()?;
     Ok(())
 }

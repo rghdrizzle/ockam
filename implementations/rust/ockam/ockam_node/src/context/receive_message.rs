@@ -28,7 +28,7 @@ impl MessageReceiveOptions {
     /// Default options with [`DEFAULT_TIMEOUT`]
     pub fn new() -> Self {
         Self {
-            message_wait: MessageWait::Timeout(Duration::from_secs(DEFAULT_TIMEOUT)),
+            message_wait: MessageWait::Timeout(DEFAULT_TIMEOUT),
         }
     }
 
@@ -107,7 +107,7 @@ impl Context {
                     break Ok(routed_msg);
                 }
                 Err(_err) => {
-                    error!(destination_addr = %destination_addr, "Encountered unparseable message")
+                    error!(destination_addr = %destination_addr, "Encountered unparsable message")
                 }
             }
         }

@@ -1,20 +1,27 @@
+use clap::Args;
+use miette::miette;
+
+use ockam::{route, Context};
+use ockam_api::address::extract_address_value;
+use ockam_api::nodes::models::portal::OutletStatus;
+use ockam_api::nodes::BackgroundNode;
+use ockam_api::route_to_multiaddr;
+use ockam_core::api::Request;
+
 use crate::node::{get_node_name, initialize_node_if_default, NodeOpts};
 use crate::tcp::util::alias_parser;
-use crate::util::{extract_address_value, node_rpc, Rpc};
+use crate::util::node_rpc;
 use crate::Result;
 use crate::{docs, CommandGlobalOpts};
-use clap::Args;
-use ockam::{route, Context};
-use ockam_api::error::ApiError;
-use ockam_api::nodes::models::portal::OutletStatus;
-use ockam_api::route_to_multiaddr;
-use ockam_core::api::{Request, RequestBuilder};
 
+const PREVIEW_TAG: &str = include_str!("../../static/preview_tag.txt");
 const AFTER_LONG_HELP: &str = include_str!("./static/show/after_long_help.txt");
 
-/// Delete a TCP Outlet
+/// Show a TCP Outlet's details
 #[derive(Clone, Debug, Args)]
-#[command(after_long_help = docs::after_help(AFTER_LONG_HELP))]
+#[command(
+before_help = docs::before_help(PREVIEW_TAG),
+after_long_help = docs::after_help(AFTER_LONG_HELP))]
 pub struct ShowCommand {
     /// Name assigned to outlet that will be shown
     #[arg(display_order = 900, required = true, id = "ALIAS", value_parser = alias_parser)]
@@ -35,26 +42,23 @@ impl ShowCommand {
 pub async fn run_impl(
     ctx: Context,
     (opts, cmd): (CommandGlobalOpts, ShowCommand),
-) -> crate::Result<()> {
+) -> miette::Result<()> {
     let node_name = get_node_name(&opts.state, &cmd.node_opts.at_node);
     let node_name = extract_address_value(&node_name)?;
-    let mut rpc = Rpc::background(&ctx, &opts, &node_name)?;
-    rpc.request(make_api_request(cmd)?).await?;
-    rpc.is_ok()?;
-
-    let outlet_to_show = rpc.parse_response::<OutletStatus>()?;
+    let node = BackgroundNode::create(&ctx, &opts.state, &node_name).await?;
+    let outlet_status: OutletStatus = node.ask(&ctx, make_api_request(cmd)?).await?;
 
     println!("Outlet:");
-    println!("  Alias: {}", outlet_to_show.alias);
-    let addr = route_to_multiaddr(&route![outlet_to_show.worker_addr.to_string()])
-        .ok_or_else(|| ApiError::generic("Invalid Outlet Address"))?;
+    println!("  Alias: {}", outlet_status.alias);
+    let addr = route_to_multiaddr(&route![outlet_status.worker_addr.to_string()])
+        .ok_or_else(|| miette!("Invalid Outlet Address"))?;
     println!("  From Outlet: {addr}");
-    println!("  To TCP: {}", outlet_to_show.tcp_addr);
+    println!("  To TCP: {}", outlet_status.socket_addr);
     Ok(())
 }
 
 /// Construct a request to show a tcp outlet
-fn make_api_request<'a>(cmd: ShowCommand) -> Result<RequestBuilder<'a>> {
+fn make_api_request(cmd: ShowCommand) -> Result<Request> {
     let alias = cmd.alias;
     let request = Request::get(format!("/node/outlet/{alias}"));
     Ok(request)

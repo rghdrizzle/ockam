@@ -1,258 +1,142 @@
+use crate::cloud::Controller;
+use miette::IntoDiagnostic;
 use minicbor::{Decode, Encode};
+use ockam_core::api::Request;
+use ockam_core::async_trait;
+use ockam_node::Context;
 use serde::Serialize;
 
-use ockam_core::CowStr;
-#[cfg(feature = "tag")]
-use ockam_core::TypeTag;
+const TARGET: &str = "ockam_api::cloud::space";
 
-#[derive(Encode, Decode, Serialize, Debug)]
+#[derive(Encode, Decode, Serialize, Debug, Clone)]
 #[rustfmt::skip]
 #[cbor(map)]
-pub struct Space<'a> {
-    #[cfg(feature = "tag")]
-    #[serde(skip)]
-    #[n(0)] pub tag: TypeTag<7574645>,
-    #[b(1)] pub id: CowStr<'a>,
-    #[b(2)] pub name: CowStr<'a>,
-    #[b(3)] pub users: Vec<CowStr<'a>>,
-}
-
-impl Clone for Space<'_> {
-    fn clone(&self) -> Self {
-        self.to_owned()
-    }
-}
-
-impl Space<'_> {
-    pub fn to_owned<'r>(&self) -> Space<'r> {
-        Space {
-            #[cfg(feature = "tag")]
-            tag: self.tag.to_owned(),
-            id: self.id.to_owned(),
-            name: self.name.to_owned(),
-            users: self.users.iter().map(|x| x.to_owned()).collect(),
-        }
-    }
+pub struct Space {
+    #[n(1)] pub id: String,
+    #[n(2)] pub name: String,
+    #[n(3)] pub users: Vec<String>,
 }
 
 #[derive(Encode, Decode, Debug)]
 #[cfg_attr(test, derive(Clone))]
 #[rustfmt::skip]
 #[cbor(map)]
-pub struct CreateSpace<'a> {
-    #[cfg(feature = "tag")]
-    #[n(0)] pub tag: TypeTag<2321503>,
-    #[b(1)] pub name: CowStr<'a>,
-    #[b(2)] pub users: Vec<CowStr<'a>>,
+pub struct CreateSpace {
+    #[n(1)] pub name: String,
+    #[n(2)] pub users: Vec<String>,
 }
 
-impl<'a> CreateSpace<'a> {
-    pub fn new<S: Into<CowStr<'a>>, T: AsRef<str>>(name: S, users: &'a [T]) -> Self {
-        Self {
-            #[cfg(feature = "tag")]
-            tag: TypeTag,
-            name: name.into(),
-            users: users.iter().map(|x| CowStr::from(x.as_ref())).collect(),
-        }
+impl CreateSpace {
+    pub fn new(name: String, users: Vec<String>) -> Self {
+        Self { name, users }
     }
 }
 
-mod node {
-    use minicbor::Decoder;
-    use tracing::trace;
+#[async_trait]
+pub trait Spaces {
+    async fn create_space(
+        &self,
+        ctx: &Context,
+        name: String,
+        users: Vec<String>,
+    ) -> miette::Result<Space>;
 
-    use ockam_core::api::Request;
-    use ockam_core::{self, Result};
-    use ockam_node::Context;
+    async fn get_space(&self, ctx: &Context, space_id: String) -> miette::Result<Space>;
 
-    use crate::cloud::space::CreateSpace;
-    use crate::cloud::{BareCloudRequestWrapper, CloudRequestWrapper};
-    use crate::nodes::NodeManagerWorker;
+    async fn delete_space(&self, ctx: &Context, space_id: String) -> miette::Result<()>;
 
-    const TARGET: &str = "ockam_api::cloud::space";
+    async fn list_spaces(&self, ctx: &Context) -> miette::Result<Vec<Space>>;
+}
 
-    impl NodeManagerWorker {
-        pub(crate) async fn create_space(
-            &mut self,
-            ctx: &mut Context,
-            dec: &mut Decoder<'_>,
-        ) -> Result<Vec<u8>> {
-            let req_wrapper: CloudRequestWrapper<CreateSpace> = dec.decode()?;
-            let cloud_multiaddr = req_wrapper.multiaddr()?;
-            let req_body = req_wrapper.req;
-
-            let label = "create_space";
-            trace!(target: TARGET, space = %req_body.name, "creating space");
-
-            let req_builder = Request::post("/v0/").body(req_body);
-
-            self.request_controller(
-                ctx,
-                label,
-                "create_space",
-                &cloud_multiaddr,
-                "spaces",
-                req_builder,
-                None,
-            )
+#[async_trait]
+impl Spaces for Controller {
+    async fn create_space(
+        &self,
+        ctx: &Context,
+        name: String,
+        users: Vec<String>,
+    ) -> miette::Result<Space> {
+        trace!(target: TARGET, space = %name, "creating space");
+        let req = Request::post("/v0/").body(CreateSpace::new(name, users));
+        self.0
+            .ask(ctx, "spaces", req)
             .await
-        }
+            .into_diagnostic()?
+            .success()
+            .into_diagnostic()
+    }
 
-        pub(crate) async fn list_spaces(
-            &mut self,
-            ctx: &mut Context,
-            dec: &mut Decoder<'_>,
-        ) -> Result<Vec<u8>> {
-            let req_wrapper: BareCloudRequestWrapper = dec.decode()?;
-            let cloud_multiaddr = req_wrapper.multiaddr()?;
-
-            let label = "list_spaces";
-            trace!(target: TARGET, "listing spaces");
-
-            let req_builder = Request::get("/v0/");
-
-            self.request_controller(
-                ctx,
-                label,
-                None,
-                &cloud_multiaddr,
-                "spaces",
-                req_builder,
-                None,
-            )
+    async fn get_space(&self, ctx: &Context, space_id: String) -> miette::Result<Space> {
+        trace!(target: TARGET, space = %space_id, "getting space");
+        let req = Request::get(format!("/v0/{space_id}"));
+        self.0
+            .ask(ctx, "spaces", req)
             .await
-        }
+            .into_diagnostic()?
+            .success()
+            .into_diagnostic()
+    }
 
-        pub(crate) async fn get_space(
-            &mut self,
-            ctx: &mut Context,
-            dec: &mut Decoder<'_>,
-            id: &str,
-        ) -> Result<Vec<u8>> {
-            let req_wrapper: BareCloudRequestWrapper = dec.decode()?;
-            let cloud_multiaddr = req_wrapper.multiaddr()?;
-
-            let label = "get_space";
-            trace!(target: TARGET, space = %id, space = %id, "getting space");
-
-            let req_builder = Request::get(format!("/v0/{id}"));
-
-            self.request_controller(
-                ctx,
-                label,
-                None,
-                &cloud_multiaddr,
-                "spaces",
-                req_builder,
-                None,
-            )
+    async fn delete_space(&self, ctx: &Context, space_id: String) -> miette::Result<()> {
+        trace!(target: TARGET, space = %space_id, "deleting space");
+        let req = Request::delete(format!("/v0/{space_id}"));
+        self.0
+            .tell(ctx, "spaces", req)
             .await
-        }
+            .into_diagnostic()?
+            .success()
+            .into_diagnostic()
+    }
 
-        pub(crate) async fn delete_space(
-            &mut self,
-            ctx: &mut Context,
-            dec: &mut Decoder<'_>,
-            id: &str,
-        ) -> Result<Vec<u8>> {
-            let req_wrapper: BareCloudRequestWrapper = dec.decode()?;
-            let cloud_multiaddr = req_wrapper.multiaddr()?;
-
-            let label = "delete_space";
-            trace!(target: TARGET, space = %id, "deleting space");
-
-            let req_builder = Request::delete(format!("/v0/{id}"));
-
-            self.request_controller(
-                ctx,
-                label,
-                None,
-                &cloud_multiaddr,
-                "spaces",
-                req_builder,
-                None,
-            )
+    async fn list_spaces(&self, ctx: &Context) -> miette::Result<Vec<Space>> {
+        trace!(target: TARGET, "listing spaces");
+        self.0
+            .ask(ctx, "spaces", Request::get("/v0/"))
             .await
-        }
+            .into_diagnostic()?
+            .success()
+            .into_diagnostic()
     }
 }
 
 #[cfg(test)]
 pub mod tests {
-    use quickcheck::{Arbitrary, Gen};
+    use quickcheck::{quickcheck, Arbitrary, Gen, TestResult};
 
     use crate::cloud::space::CreateSpace;
+    use crate::schema::tests::validate_with_schema;
 
     use super::*;
 
-    mod schema {
-        use cddl_cat::validate_cbor_bytes;
-        use quickcheck::{quickcheck, TestResult};
-
-        use crate::schema::SCHEMA;
-
-        use super::*;
-
-        #[derive(Debug, Clone)]
-        struct Sp(Space<'static>);
-
-        impl Arbitrary for Sp {
-            fn arbitrary(g: &mut Gen) -> Self {
-                Sp(Space {
-                    #[cfg(feature = "tag")]
-                    tag: Default::default(),
-                    id: String::arbitrary(g).into(),
-                    name: String::arbitrary(g).into(),
-                    users: vec![String::arbitrary(g).into(), String::arbitrary(g).into()],
-                })
-            }
+    quickcheck! {
+        fn space(s: Space) -> TestResult {
+            validate_with_schema("space", s)
         }
 
-        #[derive(Debug, Clone)]
-        struct CSp(CreateSpace<'static>);
-
-        impl Arbitrary for CSp {
-            fn arbitrary(g: &mut Gen) -> Self {
-                CSp(CreateSpace {
-                    #[cfg(feature = "tag")]
-                    tag: Default::default(),
-                    name: String::arbitrary(g).into(),
-                    users: vec![String::arbitrary(g).into(), String::arbitrary(g).into()],
-                })
-            }
+        fn spaces(ss: Vec<Space>) -> TestResult {
+            validate_with_schema("spaces", ss)
         }
 
-        quickcheck! {
-            fn space(o: Sp) -> TestResult {
-                let cbor = minicbor::to_vec(o.0).unwrap();
-                if let Err(e) = validate_cbor_bytes("space", SCHEMA, &cbor) {
-                    return TestResult::error(e.to_string())
-                }
-                TestResult::passed()
+        fn create_space(cs: CreateSpace) -> TestResult {
+            validate_with_schema("create_space", cs)
+        }
+    }
+
+    impl Arbitrary for Space {
+        fn arbitrary(g: &mut Gen) -> Self {
+            Space {
+                id: String::arbitrary(g),
+                name: String::arbitrary(g),
+                users: vec![String::arbitrary(g), String::arbitrary(g)],
             }
+        }
+    }
 
-            fn spaces(o: Vec<Sp>) -> TestResult {
-                let empty: Vec<Space> = vec![];
-                let cbor = minicbor::to_vec(empty).unwrap();
-                if let Err(e) = validate_cbor_bytes("spaces", SCHEMA, &cbor) {
-                    return TestResult::error(e.to_string())
-                }
-                TestResult::passed();
-
-                let o: Vec<Space> = o.into_iter().map(|p| p.0).collect();
-                let cbor = minicbor::to_vec(o).unwrap();
-                if let Err(e) = validate_cbor_bytes("spaces", SCHEMA, &cbor) {
-                    return TestResult::error(e.to_string())
-                }
-                TestResult::passed()
-            }
-
-            fn create_space(o: CSp) -> TestResult {
-                let cbor = minicbor::to_vec(o.0).unwrap();
-                if let Err(e) = validate_cbor_bytes("create_space", SCHEMA, &cbor) {
-                    return TestResult::error(e.to_string())
-                }
-                TestResult::passed()
+    impl Arbitrary for CreateSpace {
+        fn arbitrary(g: &mut Gen) -> Self {
+            CreateSpace {
+                name: String::arbitrary(g),
+                users: vec![String::arbitrary(g), String::arbitrary(g)],
             }
         }
     }

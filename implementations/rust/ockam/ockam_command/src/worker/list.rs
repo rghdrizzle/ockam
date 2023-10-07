@@ -1,24 +1,34 @@
-use crate::node::{get_node_name, initialize_node_if_default};
-use crate::util::{api, node_rpc, RpcBuilder};
-use crate::{docs, CommandGlobalOpts};
 use clap::Args;
-use ockam::{Context, TcpTransport};
+use colorful::Colorful;
+use miette::miette;
+use tokio::sync::Mutex;
+use tokio::try_join;
+
+use ockam::Context;
+use ockam_api::address::extract_address_value;
 use ockam_api::cli_state::StateDirTrait;
-use ockam_api::nodes::models::workers::WorkerList;
-use std::fmt::{Display, Formatter};
-use std::time::Duration;
+use ockam_api::nodes::models::workers::{WorkerList, WorkerStatus};
+use ockam_api::nodes::BackgroundNode;
+
+use crate::node::{get_node_name, initialize_node_if_default};
+use crate::output::Output;
+use crate::terminal::OckamColor;
+use crate::util::{api, node_rpc};
+use crate::{docs, CommandGlobalOpts};
 
 const LONG_ABOUT: &str = include_str!("./static/list/long_about.txt");
+const PREVIEW_TAG: &str = include_str!("../static/preview_tag.txt");
 const AFTER_LONG_HELP: &str = include_str!("./static/list/after_long_help.txt");
 
 /// List workers on a node
 #[derive(Clone, Debug, Args)]
 #[command(
-long_about = docs::about(LONG_ABOUT),
-after_long_help = docs::after_help(AFTER_LONG_HELP)
+    long_about = docs::about(LONG_ABOUT),
+    before_help = docs::before_help(PREVIEW_TAG),
+    after_long_help = docs::after_help(AFTER_LONG_HELP)
 )]
 pub struct ListCommand {
-    /// Node at which to lookup workers (required)
+    /// Node at which to lookup workers
     #[arg(value_name = "NODE", long, display_order = 800)]
     at: Option<String>,
 }
@@ -33,41 +43,53 @@ impl ListCommand {
 async fn run_impl(
     ctx: Context,
     (opts, cmd): (CommandGlobalOpts, ListCommand),
-) -> crate::Result<()> {
+) -> miette::Result<()> {
     let at = get_node_name(&opts.state, &cmd.at);
-    if let Ok(node_state) = opts.state.nodes.get(&at) {
-        let tcp = TcpTransport::create(&ctx).await?;
-        let mut rpc = RpcBuilder::new(&ctx, &opts, node_state.name())
-            .tcp(&tcp)?
-            .build();
-        if rpc
-            .request_with_timeout(api::list_workers(), Duration::from_millis(1000))
-            .await
-            .is_ok()
-        {
-            let workers = rpc.parse_response::<WorkerList>()?;
-            println!("Node: {}", &node_state.name());
-            print!("{}", WorkerDisplay(workers))
-        }
+    let node_name = extract_address_value(&at)?;
+
+    if !opts.state.nodes.get(&node_name)?.is_running() {
+        return Err(miette!("The node '{}' is not running", node_name));
     }
+
+    let node = BackgroundNode::create(&ctx, &opts.state, &node_name).await?;
+    let is_finished: Mutex<bool> = Mutex::new(false);
+
+    let get_workers = async {
+        let workers: WorkerList = node.ask(&ctx, api::list_workers()).await?;
+        *is_finished.lock().await = true;
+        Ok(workers)
+    };
+
+    let output_messages = vec![format!(
+        "Listing Workers on {}...\n",
+        node_name
+            .to_string()
+            .color(OckamColor::PrimaryResource.color())
+    )];
+
+    let progress_output = opts
+        .terminal
+        .progress_output(&output_messages, &is_finished);
+
+    let (workers, _) = try_join!(get_workers, progress_output)?;
+
+    let list = opts.terminal.build_list(
+        &workers.list,
+        &format!("Workers on {node_name}"),
+        &format!("No workers found on {node_name}."),
+    )?;
+    opts.terminal.stdout().plain(list).write_line()?;
+
     Ok(())
 }
 
-struct WorkerDisplay<'a>(WorkerList<'a>);
-
-impl Display for WorkerDisplay<'_> {
-    fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
-        if self.0.list.is_empty() {
-            writeln!(f, "No workers found.")?;
-            return Ok(());
-        }
-
-        let sorted: Vec<String> = self.0.list.iter().map(|ws| ws.addr.to_string()).collect();
-
-        writeln!(f, "{:2}Workers:", "")?;
-        for (_idx, worker) in sorted.iter().enumerate() {
-            writeln!(f, "{:4}{}", "", worker)?;
-        }
-        Ok(())
+impl Output for WorkerStatus {
+    fn output(&self) -> crate::Result<String> {
+        Ok(format!(
+            "Worker {}",
+            self.addr
+                .to_string()
+                .color(OckamColor::PrimaryResource.color())
+        ))
     }
 }

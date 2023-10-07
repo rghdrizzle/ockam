@@ -4,6 +4,68 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## 0.91.0 - 2023-10-07
+
+### Changed
+
+- Updated dependencies
+
+## 0.90.0 - 2023-10-05
+
+### Changed
+
+- Updated dependencies
+
+## 0.89.0 - 2023-09-28
+
+### Changed
+
+- Updated dependencies
+
+## 0.88.0 - 2023-09-23
+
+### Changed
+
+- Updated dependencies
+
+## 0.87.0 - 2023-09-22
+
+### Changed
+
+- Updated dependencies
+
+## 0.86.0 - 2023-09-13
+
+### Changed
+
+- Updated dependencies
+
+## 0.85.0 - 2023-09-06
+
+### Changed
+
+- Improve tcp disconnect api
+- Updated dependencies
+
+### Fixed
+
+- Use the outlet socket address to search for the outlet status
+
+## 0.84.0 - 2023-06-26
+
+### Changed
+
+- Improve type safety for `FlowControls`
+- Hide `Spawner` vs `Producer` logic under the hood
+- Updated dependencies
+
+## 0.83.0 - 2023-06-09
+
+### Changed
+
+- Make `AccessControl` optional while starting a `Worker`
+- Updated dependencies
+
 ## 0.82.0 - 2023-05-26
 
 ### Changed
@@ -44,7 +106,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Changed
 
 - Introduce `TrustOptions::insecure()` and `::insecure_test()`
-- Simplify `TrustOptions` for outgoing negotations
+- Simplify `TrustOptions` for outgoing negotiations
 - Rename `insecure_test` -> `new`
 - Rename `Sessions` -> `FlowControls`
 - Rename `TrustOptions` -> `Options`

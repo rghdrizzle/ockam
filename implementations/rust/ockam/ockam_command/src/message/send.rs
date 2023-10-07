@@ -1,18 +1,24 @@
-use anyhow::Context as _;
-use clap::Args;
-
 use core::time::Duration;
-use ockam::{Context, TcpTransport};
-use ockam_api::nodes::models::secure_channel::CredentialExchangeMode;
-use ockam_api::nodes::service::message::SendMessage;
-use ockam_core::api::{Request, RequestBuilder};
+
+use clap::Args;
+use miette::{Context as _, IntoDiagnostic};
+
+use ockam::Context;
+use ockam_api::address::extract_address_value;
+use ockam_api::nodes::service::message::{MessageSender, SendMessage};
+use ockam_api::nodes::BackgroundNode;
+use ockam_api::nodes::InMemoryNode;
+use ockam_core::api::Request;
 use ockam_multiaddr::MultiAddr;
 
 use crate::identity::{get_identity_name, initialize_identity_if_default};
-use crate::node::util::{delete_embedded_node, start_embedded_node_with_vault_and_identity};
+
+use crate::project::util::{
+    clean_projects_multiaddr, get_projects_secure_channels_from_config_lookup,
+};
 use crate::util::api::{CloudOpts, TrustContextOpts};
-use crate::util::{clean_nodes_multiaddr, extract_address_value, node_rpc, RpcBuilder};
-use crate::Result;
+use crate::util::duration::duration_parser;
+use crate::util::{clean_nodes_multiaddr, node_rpc};
 use crate::{docs, CommandGlobalOpts};
 
 const LONG_ABOUT: &str = include_str!("./static/send/long_about.txt");
@@ -38,9 +44,9 @@ pub struct SendCommand {
     #[arg(long)]
     pub hex: bool,
 
-    /// Override Default Timeout
-    #[arg(long, value_name = "TIMEOUT", default_value = "10")]
-    pub timeout: u64,
+    /// Override default timeout
+    #[arg(long, value_name = "TIMEOUT", default_value = "10s", value_parser = duration_parser)]
+    pub timeout: Duration,
 
     pub message: String,
 
@@ -58,78 +64,74 @@ impl SendCommand {
     }
 }
 
-async fn rpc(mut ctx: Context, (opts, cmd): (CommandGlobalOpts, SendCommand)) -> Result<()> {
-    async fn go(ctx: &mut Context, opts: CommandGlobalOpts, cmd: SendCommand) -> Result<()> {
-        // Setup environment depending on whether we are sending the message from an embedded node or a background node
-        let (api_node, tcp) = if let Some(node) = &cmd.from {
-            let api_node = extract_address_value(node)?;
-            let tcp = TcpTransport::create(ctx).await?;
-            (api_node, Some(tcp))
-        } else {
-            let identity = get_identity_name(&opts.state, &cmd.cloud_opts.identity);
-            let api_node = start_embedded_node_with_vault_and_identity(
-                ctx,
-                &opts,
-                None,
-                Some(identity),
-                Some(&cmd.trust_context_opts),
-            )
-            .await?;
-            (api_node, None)
-        };
-
+async fn rpc(ctx: Context, (opts, cmd): (CommandGlobalOpts, SendCommand)) -> miette::Result<()> {
+    async fn go(ctx: &Context, opts: CommandGlobalOpts, cmd: SendCommand) -> miette::Result<()> {
         // Process `--to` Multiaddr
         let (to, meta) =
             clean_nodes_multiaddr(&cmd.to, &opts.state).context("Argument '--to' is invalid")?;
 
-        // Replace `/project/<name>` occurrences with their respective secure channel addresses
-        let projects_sc = crate::project::util::get_projects_secure_channels_from_config_lookup(
-            ctx,
-            &opts,
-            &meta,
-            &api_node,
-            tcp.as_ref(),
-            CredentialExchangeMode::Oneway,
-        )
-        .await?;
-        let to = crate::project::util::clean_projects_multiaddr(to, projects_sc)?;
-        // Send request
-        let mut rpc = RpcBuilder::new(ctx, &opts, &api_node)
-            .tcp(tcp.as_ref())?
-            .build();
-
         let msg_bytes = if cmd.hex {
-            hex::decode(cmd.message).context("Invalid hex string")?
+            hex::decode(cmd.message)
+                .into_diagnostic()
+                .context("The message is not a valid hex string")?
         } else {
             cmd.message.as_bytes().to_vec()
         };
 
-        rpc.request_with_timeout(
-            req(&to, msg_bytes.as_slice()),
-            Duration::from_secs(cmd.timeout),
-        )
-        .await?;
-        let res = {
-            let res = rpc.parse_response::<Vec<u8>>()?;
-            if cmd.hex {
-                hex::encode(res)
-            } else {
-                String::from_utf8(res).context("Received content is not a valid utf8 string")?
-            }
+        // Setup environment depending on whether we are sending the message from an background node
+        // or an in-memory node
+        let response: Vec<u8> = if let Some(node) = &cmd.from {
+            let node_name = extract_address_value(node)?;
+            BackgroundNode::create(ctx, &opts.state, &node_name)
+                .await?
+                .set_timeout(cmd.timeout)
+                .ask(ctx, req(&to, msg_bytes))
+                .await?
+        } else {
+            let identity_name = get_identity_name(&opts.state, &cmd.cloud_opts.identity);
+            let trust_context_config = cmd.trust_context_opts.to_config(&opts.state)?.build();
+
+            let node_manager = InMemoryNode::start_node(
+                ctx,
+                &opts.state,
+                None,
+                Some(identity_name.clone()),
+                cmd.trust_context_opts.project_path.as_ref(),
+                trust_context_config,
+            )
+            .await?;
+
+            // Replace `/project/<name>` occurrences with their respective secure channel addresses
+            let projects_sc = get_projects_secure_channels_from_config_lookup(
+                &opts,
+                ctx,
+                &node_manager,
+                &meta,
+                Some(identity_name),
+                Some(cmd.timeout),
+            )
+            .await?;
+            let to = clean_projects_multiaddr(to, projects_sc)?;
+            node_manager
+                .send_message(ctx, &to, msg_bytes, Some(cmd.timeout))
+                .await
+                .into_diagnostic()?
         };
 
-        // only delete node in case 'from' is empty and embedded node was started before
-        if cmd.from.is_none() {
-            delete_embedded_node(&opts, rpc.node_name()).await;
-        }
+        let result = if cmd.hex {
+            hex::encode(response)
+        } else {
+            String::from_utf8(response)
+                .into_diagnostic()
+                .context("Received content is not a valid utf8 string")?
+        };
 
-        opts.terminal.stdout().plain(&res).write_line()?;
-
+        opts.terminal.stdout().plain(result).write_line()?;
         Ok(())
     }
-    go(&mut ctx, opts, cmd).await
+    go(&ctx, opts, cmd).await
 }
 
-pub(crate) fn req<'a>(to: &'a MultiAddr, message: &'a [u8]) -> RequestBuilder<'a, SendMessage<'a>> {
+pub(crate) fn req(to: &MultiAddr, message: Vec<u8>) -> Request<SendMessage> {
     Request::post("v0/message").body(SendMessage::new(to, message))
 }

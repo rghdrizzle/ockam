@@ -1,5 +1,6 @@
 use crate::cli_state::{file_stem, CliState, CliStateError};
-use ockam_core::async_trait;
+use ockam_core::errcode::{Kind, Origin};
+use ockam_core::{async_trait, Error};
 use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
 
@@ -18,7 +19,7 @@ pub trait StateDirTrait: Sized + Send + Sync {
     const DIR_NAME: &'static str;
     const HAS_DATA_DIR: bool;
 
-    fn new(dir: PathBuf) -> Self;
+    fn new(root_path: &Path) -> Self;
 
     fn default_filename() -> &'static str {
         Self::DEFAULT_FILENAME
@@ -41,18 +42,29 @@ pub trait StateDirTrait: Sized + Send + Sync {
     }
 
     /// Do not run any migration by default
-    async fn migrate(&self, _item_path: &Path) -> Result<()> {
+    async fn migrate(&self, _path: &Path) -> Result<()> {
         Ok(())
     }
 
     fn load(root_path: &Path) -> Result<Self> {
+        Self::create_dirs(root_path)?;
+        Ok(Self::new(root_path))
+    }
+
+    /// Recreate all the state directories
+    fn reset(&self, root_path: &Path) -> Result<PathBuf> {
+        Self::create_dirs(root_path)
+    }
+
+    /// Create all the state directories
+    fn create_dirs(root_path: &Path) -> Result<PathBuf> {
         let dir = Self::build_dir(root_path);
         if Self::has_data_dir() {
             std::fs::create_dir_all(dir.join(DATA_DIR_NAME))?;
         } else {
             std::fs::create_dir_all(&dir)?;
-        }
-        Ok(Self::new(dir))
+        };
+        Ok(dir)
     }
 
     fn dir(&self) -> &PathBuf;
@@ -82,19 +94,28 @@ pub trait StateDirTrait: Sized + Send + Sync {
         name: impl AsRef<str>,
         config: <<Self as StateDirTrait>::Item as StateItemTrait>::Config,
     ) -> Result<Self::Item> {
+        debug!(name = %name.as_ref(), "Creating new config resource");
         if self.exists(&name) {
-            return Err(CliStateError::AlreadyExists);
+            return Err(CliStateError::AlreadyExists {
+                resource: Self::default_filename().to_string(),
+                name: name.as_ref().to_string(),
+            });
         }
+        trace!(name = %name.as_ref(), "Creating config resource instance");
         let state = Self::Item::new(self.path(&name), config)?;
         if !self.default_path()?.exists() {
             self.set_default(&name)?;
         }
+        info!(name = %name.as_ref(), "Created new config resource");
         Ok(state)
     }
 
     fn get(&self, name: impl AsRef<str>) -> Result<Self::Item> {
         if !self.exists(&name) {
-            return Err(CliStateError::NotFound);
+            return Err(CliStateError::ResourceNotFound {
+                resource: Self::default_filename().to_string(),
+                name: name.as_ref().to_string(),
+            });
         }
         Self::Item::load(self.path(&name))
     }
@@ -102,7 +123,7 @@ pub trait StateDirTrait: Sized + Send + Sync {
     fn list(&self) -> Result<Vec<Self::Item>> {
         let mut items = Vec::default();
         for name in self.list_items_names()? {
-            if let Ok(item) = self.get(&name) {
+            if let Ok(item) = self.get(name) {
                 items.push(item);
             }
         }
@@ -111,7 +132,12 @@ pub trait StateDirTrait: Sized + Send + Sync {
 
     fn list_items_names(&self) -> Result<Vec<String>> {
         let mut items = Vec::default();
-        for entry in std::fs::read_dir(self.dir())? {
+        let iter = std::fs::read_dir(self.dir()).map_err(|e| {
+            let dir = self.dir().as_path().to_string_lossy();
+            error!(%dir, %e, "Unable to read state directory");
+            CliStateError::InvalidOperation(format!("Unable to read state from directory {dir}"))
+        })?;
+        for entry in iter {
             let entry_path = entry?.path();
             if self.is_item_path(&entry_path)? {
                 items.push(file_stem(&entry_path)?);
@@ -130,7 +156,7 @@ pub trait StateDirTrait: Sized + Send + Sync {
     fn list_items_paths(&self) -> Result<Vec<PathBuf>> {
         let mut items = Vec::default();
         for name in self.list_items_names()? {
-            let path = self.path(&name);
+            let path = self.path(name);
             items.push(path);
         }
         Ok(items)
@@ -141,7 +167,7 @@ pub trait StateDirTrait: Sized + Send + Sync {
         // Retrieve state. If doesn't exist do nothing.
         let s = match self.get(&name) {
             Ok(project) => project,
-            Err(CliStateError::NotFound) => return Ok(()),
+            Err(CliStateError::ResourceNotFound { .. }) => return Ok(()),
             Err(e) => return Err(e),
         };
         // If it's the default, remove link
@@ -165,15 +191,24 @@ pub trait StateDirTrait: Sized + Send + Sync {
     }
 
     fn set_default(&self, name: impl AsRef<str>) -> Result<()> {
+        debug!(name = %name.as_ref(), "Setting default item");
         if !self.exists(&name) {
-            return Err(CliStateError::NotFound);
+            return Err(CliStateError::ResourceNotFound {
+                resource: Self::default_filename().to_string(),
+                name: name.as_ref().to_string(),
+            });
         }
         let original = self.path(&name);
         let link = self.default_path()?;
+        info!("removing link {:?}", link);
         // Remove link if it exists
         let _ = std::fs::remove_file(&link);
-        // Create link to the identity
+        info!("symlink to {:?}", original);
+        // Create link to the default item
+        std::fs::create_dir_all(link.parent().unwrap())
+            .map_err(|e| Error::new(Origin::Node, Kind::Io, e))?;
         std::os::unix::fs::symlink(original, link)?;
+        info!(name = %name.as_ref(), "Set default item");
         Ok(())
     }
 
@@ -191,7 +226,7 @@ pub trait StateDirTrait: Sized + Send + Sync {
     fn is_empty(&self) -> Result<bool> {
         for entry in std::fs::read_dir(self.dir())? {
             let name = file_stem(&entry?.path())?;
-            if self.get(&name).is_ok() {
+            if self.get(name).is_ok() {
                 return Ok(false);
             }
         }
@@ -232,11 +267,11 @@ pub trait StateItemTrait: Sized + Send {
 #[cfg(test)]
 mod tests {
     use crate::cli_state::{StateDirTrait, StateItemTrait};
-    use std::path::PathBuf;
+    use std::path::{Path, PathBuf};
 
     #[test]
     fn test_is_item_path() {
-        let config = TestConfig::new("dir".into());
+        let config = TestConfig::new(Path::new("dir"));
         let path = config.path("name");
         assert!(config.is_item_path(&path).unwrap())
     }
@@ -251,8 +286,10 @@ mod tests {
         const DIR_NAME: &'static str = "";
         const HAS_DATA_DIR: bool = false;
 
-        fn new(dir: PathBuf) -> Self {
-            Self { dir }
+        fn new(root_path: &Path) -> Self {
+            Self {
+                dir: Self::build_dir(root_path),
+            }
         }
 
         fn dir(&self) -> &PathBuf {

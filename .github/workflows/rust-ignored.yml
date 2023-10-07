@@ -12,10 +12,8 @@ on:
       - "**.toml"
       - "**/Cargo.lock"
       - "implementations/rust/ockam/ockam_command/tests/**"
-      - "**.gradle"
-      - "tools/gradle/**"
-      - "gradlew"
-      - "gradlew.bat"
+      - "**/Makefile"
+      - "tools/nix/**"
 
 jobs:
   lint-cargo-toml:
@@ -37,10 +35,10 @@ jobs:
       - run: 'echo "Rust - lint_cargo_clippy - Ignored"'
 
   lint_cargo_deny:
-    name: Rust - lint_cargo_clippy
+    name: Rust - lint_cargo_deny
     runs-on: ubuntu-20.04
     steps:
-      - run: 'echo "Rust - lint_cargo_clippy - Ignored"'
+      - run: 'echo "Rust - lint_cargo_deny - Ignored"'
 
   build_docs:
     name: Rust - build_docs
@@ -71,12 +69,6 @@ jobs:
     runs-on: ubuntu-20.04
     steps:
       - run: 'echo "Rust - check_no_std - Ignored"'
-
-  check_tag:
-    name: Rust - check_tag
-    runs-on: ubuntu-20.04
-    steps:
-      - run: 'echo "Rust - check_tag - Ignored"'
 
   check_cargo_update:
     name: Rust - check_cargo_update
@@ -113,3 +105,9 @@ jobs:
     runs-on: ${{ matrix.os }}
     steps:
       - run: 'echo "Rust - lint_cargo_lock - Ignored"'
+
+  # test_orchestrator_ockam_command:
+  #   name: Rust - test_orchestrator_ockam_command
+  #   runs-on: ubuntu-20.04
+  #   steps:
+  #     - run: 'echo "Rust - test_orchestrator_ockam_command - Ignored"'

@@ -3,6 +3,19 @@
 //!  - manage projects and spaces hosted within the Ockam Orchestrator
 //!
 //! For more information please visit the [command guide](https://docs.ockam.io/reference/command)
+//!
+//! ## Instructions on how to install Ockam Command
+//! 1. You can install Ockam Command pre-built binary using these [steps](https://docs.ockam.io/#quick-start). You can run the following command in your terminal to install the pre-built binary:
+//!
+//!     ```bash
+//!     curl --proto '=https' --tlsv1.2 -sSfL https://install.command.ockam.io | bash
+//!     ```
+//!
+//! 1. To build Ockam Command from source, fork the [repo](https://github.com/build-trust/ockam), and then clone it to your machine. Open a terminal and go to the folder that you just cloned the repo into. Then run the following to install `ockam` so that you can run it from the command line.
+//!
+//!     ```bash
+//!     cd implementations/rust/ockam/ockam_command && cargo install --path .
+//!     ```
 
 mod admin;
 mod authenticated;
@@ -11,19 +24,21 @@ mod completion;
 mod configuration;
 mod credential;
 mod docs;
-mod enroll;
+pub mod enroll;
 mod environment;
-mod error;
+pub mod error;
 mod flow_control;
-mod identity;
+pub mod identity;
 mod kafka;
 mod lease;
 mod logs;
 mod manpages;
 mod markdown;
 mod message;
-mod node;
+pub mod node;
 mod operation;
+mod output;
+mod pager;
 mod policy;
 mod project;
 mod relay;
@@ -31,14 +46,18 @@ mod reset;
 mod run;
 mod secure_channel;
 mod service;
+#[cfg(feature = "orchestrator")]
+mod share;
+pub mod shutdown;
+mod sidecar;
 mod space;
 mod status;
 mod subscription;
-mod tcp;
+pub mod tcp;
 mod terminal;
 mod trust_context;
 mod upgrade;
-mod util;
+pub mod util;
 mod vault;
 mod version;
 mod worker;
@@ -50,10 +69,14 @@ use crate::logs::setup_logging;
 use crate::node::NodeSubcommand;
 use crate::run::RunCommand;
 use crate::subscription::SubscriptionCommand;
-use crate::terminal::{Terminal, TerminalStream};
+pub use crate::terminal::{OckamColor, Terminal, TerminalStream};
 use authenticated::AuthenticatedCommand;
-use clap::{ArgAction, Args, Parser, Subcommand, ValueEnum};
+use clap::{ArgAction, Args, Parser, Subcommand};
 
+use crate::kafka::direct::KafkaDirectCommand;
+use crate::kafka::outlet::KafkaOutletCommand;
+use crate::output::{Output, OutputFormat};
+use crate::sidecar::SidecarCommand;
 use colorful::Colorful;
 use completion::CompletionCommand;
 use configuration::ConfigurationCommand;
@@ -65,28 +88,30 @@ use error::{Error, Result};
 use identity::IdentityCommand;
 use kafka::consumer::KafkaConsumerCommand;
 use kafka::producer::KafkaProducerCommand;
-use lazy_static::lazy_static;
 use lease::LeaseCommand;
 use manpages::ManpagesCommand;
 use markdown::MarkdownCommand;
 use message::MessageCommand;
+use miette::GraphicalReportHandler;
 use node::NodeCommand;
-use ockam_api::cli_state::{CliState, StateDirTrait};
+use ockam_api::cli_state::CliState;
+use ockam_core::env::get_env_with_default;
+use once_cell::sync::Lazy;
 use policy::PolicyCommand;
 use project::ProjectCommand;
 use relay::RelayCommand;
 use reset::ResetCommand;
 use secure_channel::{listener::SecureChannelListenerCommand, SecureChannelCommand};
 use service::ServiceCommand;
+#[cfg(feature = "orchestrator")]
+use share::ShareCommand;
 use space::SpaceCommand;
 use status::StatusCommand;
-use std::path::PathBuf;
-use std::sync::Mutex;
+use std::{path::PathBuf, sync::Mutex};
 use tcp::{
     connection::TcpConnectionCommand, inlet::TcpInletCommand, listener::TcpListenerCommand,
     outlet::TcpOutletCommand,
 };
-use terminal::OckamColor;
 use trust_context::TrustContextCommand;
 use upgrade::check_if_an_upgrade_is_available;
 use util::{exitcode, exitcode::ExitCode};
@@ -98,9 +123,7 @@ const ABOUT: &str = include_str!("./static/about.txt");
 const LONG_ABOUT: &str = include_str!("./static/long_about.txt");
 const AFTER_LONG_HELP: &str = include_str!("./static/after_long_help.txt");
 
-lazy_static! {
-    static ref PARSER_LOGS: Mutex<Vec<String>> = Mutex::new(vec![]);
-}
+static PARSER_LOGS: Lazy<Mutex<Vec<String>>> = Lazy::new(|| Mutex::new(vec![]));
 
 #[derive(Debug, Parser)]
 #[command(
@@ -112,7 +135,7 @@ after_long_help = docs::after_help(AFTER_LONG_HELP),
 version,
 long_version = Version::long(),
 next_help_heading = "Global Options",
-disable_help_flag = true
+disable_help_flag = true,
 )]
 pub struct OckamCommand {
     #[command(subcommand)]
@@ -135,8 +158,8 @@ pub struct GlobalArgs {
     )]
     help: Option<bool>,
 
-    /// Do not print any trace messages
-    #[arg(global = true, long, short, conflicts_with("verbose"))]
+    /// Do not print any log messages
+    #[arg(global = true, long, short, default_value_t = quiet_default_value())]
     quiet: bool,
 
     /// Increase verbosity of trace messages
@@ -144,17 +167,18 @@ pub struct GlobalArgs {
     global = true,
     long,
     short,
-    conflicts_with("quiet"),
+    long_help("Increase verbosity of trace messages by repeating the flag. Use `-v` to show \
+    info messages, `-vv` to show debug messages, and `-vvv` to show trace messages"),
     action = ArgAction::Count
     )]
     verbose: u8,
 
     /// Output without any colors
-    #[arg(hide = docs::hide(), global = true, long)]
+    #[arg(hide = docs::hide(), global = true, long, default_value_t = no_color_default_value())]
     no_color: bool,
 
     /// Disable tty functionality
-    #[arg(hide = docs::hide(), global = true, long)]
+    #[arg(hide = docs::hide(), global = true, long, default_value_t = no_input_default_value())]
     no_input: bool,
 
     /// Output format
@@ -173,14 +197,26 @@ pub struct GlobalArgs {
     test_argument_parser: bool,
 }
 
+fn quiet_default_value() -> bool {
+    get_env_with_default("QUIET", false).unwrap_or(false)
+}
+
+fn no_color_default_value() -> bool {
+    get_env_with_default("NO_COLOR", false).unwrap_or(false)
+}
+
+fn no_input_default_value() -> bool {
+    get_env_with_default("NO_INPUT", false).unwrap_or(false)
+}
+
 impl Default for GlobalArgs {
     fn default() -> Self {
         Self {
             help: None,
-            quiet: false,
+            quiet: quiet_default_value(),
             verbose: 0,
-            no_color: false,
-            no_input: false,
+            no_color: no_color_default_value(),
+            no_input: no_input_default_value(),
             output_format: OutputFormat::Plain,
             test_argument_parser: false,
         }
@@ -195,18 +231,6 @@ impl GlobalArgs {
     }
 }
 
-#[derive(Debug, Clone, ValueEnum, PartialEq, Eq)]
-pub enum OutputFormat {
-    Plain,
-    Json,
-}
-
-#[derive(Debug, Clone, ValueEnum, PartialEq, Eq)]
-pub enum EncodeFormat {
-    Plain,
-    Hex,
-}
-
 #[derive(Clone)]
 pub struct CommandGlobalOpts {
     pub global_args: GlobalArgs,
@@ -215,8 +239,18 @@ pub struct CommandGlobalOpts {
 }
 
 impl CommandGlobalOpts {
-    fn new(global_args: GlobalArgs) -> Self {
-        let state = CliState::initialize().expect("Failed to load the local Ockam configuration");
+    pub fn new(global_args: GlobalArgs) -> Self {
+        let state = CliState::initialize().unwrap_or_else(|_| {
+            let state = CliState::backup_and_reset().expect(
+                "Failed to initialize CliState. Try to manually remove the '~/.ockam' directory",
+            );
+            let dir = &state.dir;
+            let backup_dir = CliState::backup_default_dir().unwrap();
+            eprintln!(
+                "The {dir:?} directory has been reset and has been backed up to {backup_dir:?}"
+            );
+            state
+        });
         let terminal = Terminal::new(
             global_args.quiet,
             global_args.no_color,
@@ -236,6 +270,32 @@ impl CommandGlobalOpts {
         clone.terminal = clone.terminal.set_quiet();
         clone
     }
+
+    /// Print a value on the console.
+    /// TODO: replace this implementation with a call to the terminal instead
+    pub fn println<T>(&self, t: &T) -> Result<()>
+    where
+        T: Output + serde::Serialize,
+    {
+        self.global_args.output_format.println_value(t)
+    }
+}
+
+#[cfg(test)]
+impl CommandGlobalOpts {
+    pub fn new_for_test(global_args: GlobalArgs, state: CliState) -> Self {
+        let terminal = Terminal::new(
+            global_args.quiet,
+            global_args.no_color,
+            global_args.no_input,
+            global_args.output_format.clone(),
+        );
+        Self {
+            global_args,
+            state,
+            terminal,
+        }
+    }
 }
 
 #[derive(Clone, Debug, Subcommand)]
@@ -244,7 +304,10 @@ pub enum OckamSubcommand {
     Enroll(EnrollCommand),
     Space(SpaceCommand),
     Project(ProjectCommand),
+    Sidecar(SidecarCommand),
     Admin(AdminCommand),
+    #[cfg(feature = "orchestrator")]
+    Share(ShareCommand),
     Subscription(SubscriptionCommand),
 
     Node(Box<NodeCommand>),
@@ -258,7 +321,9 @@ pub enum OckamSubcommand {
     TcpOutlet(TcpOutletCommand),
     TcpInlet(TcpInletCommand),
 
+    KafkaOutlet(KafkaOutletCommand),
     KafkaConsumer(KafkaConsumerCommand),
+    KafkaDirect(KafkaDirectCommand),
     KafkaProducer(KafkaProducerCommand),
 
     SecureChannelListener(SecureChannelListenerCommand),
@@ -298,17 +363,31 @@ pub fn run() {
         .map(replace_hyphen_with_stdin)
         .collect::<Vec<_>>();
 
-    let command = OckamCommand::parse_from(input);
+    match OckamCommand::try_parse_from(input) {
+        Ok(command) => {
+            if !command.global_args.test_argument_parser {
+                check_if_an_upgrade_is_available();
+            }
 
-    if !command.global_args.test_argument_parser {
-        check_if_an_upgrade_is_available();
-    }
-
-    command.run();
+            command.run();
+        }
+        Err(help) => pager::render_help(help),
+    };
 }
 
 impl OckamCommand {
     pub fn run(self) {
+        // Sets a hook using our own Error Report Handler
+        // This allows us to customize how we
+        // format the error messages and their content.
+        let _hook_result = miette::set_hook(Box::new(|_| {
+            Box::new(
+                GraphicalReportHandler::new()
+                    .with_cause_chain()
+                    .with_footer(Version::short().light_gray().to_string())
+                    .with_urls(false),
+            )
+        }));
         let options = CommandGlobalOpts::new(self.global_args.clone());
 
         let _tracing_guard = if !options.global_args.quiet {
@@ -350,6 +429,8 @@ impl OckamCommand {
             OckamSubcommand::Space(c) => c.run(options),
             OckamSubcommand::Project(c) => c.run(options),
             OckamSubcommand::Admin(c) => c.run(options),
+            #[cfg(feature = "orchestrator")]
+            OckamSubcommand::Share(c) => c.run(options),
             OckamSubcommand::Subscription(c) => c.run(options),
 
             OckamSubcommand::Node(c) => c.run(options),
@@ -358,6 +439,7 @@ impl OckamCommand {
             OckamSubcommand::Message(c) => c.run(options),
             OckamSubcommand::Relay(c) => c.run(options),
 
+            OckamSubcommand::KafkaOutlet(c) => c.run(options),
             OckamSubcommand::TcpListener(c) => c.run(options),
             OckamSubcommand::TcpConnection(c) => c.run(options),
             OckamSubcommand::TcpOutlet(c) => c.run(options),
@@ -365,6 +447,7 @@ impl OckamCommand {
 
             OckamSubcommand::KafkaConsumer(c) => c.run(options),
             OckamSubcommand::KafkaProducer(c) => c.run(options),
+            OckamSubcommand::KafkaDirect(c) => c.run(options),
 
             OckamSubcommand::SecureChannelListener(c) => c.run(options),
             OckamSubcommand::SecureChannel(c) => c.run(options),
@@ -379,7 +462,7 @@ impl OckamCommand {
             OckamSubcommand::Run(c) => c.run(options),
             OckamSubcommand::Status(c) => c.run(options),
             OckamSubcommand::Reset(c) => c.run(options),
-            OckamSubcommand::Authenticated(c) => c.run(),
+            OckamSubcommand::Authenticated(c) => c.run(options),
             OckamSubcommand::Configuration(c) => c.run(options),
 
             OckamSubcommand::Completion(c) => c.run(),
@@ -389,6 +472,7 @@ impl OckamCommand {
             OckamSubcommand::Environment(c) => c.run(),
 
             OckamSubcommand::FlowControl(c) => c.run(options),
+            OckamSubcommand::Sidecar(c) => c.run(options),
         }
     }
 
@@ -397,9 +481,19 @@ impl OckamCommand {
         // for the node that is being created
         if let OckamSubcommand::Node(c) = &self.subcommand {
             if let NodeSubcommand::Create(c) = &c.subcommand {
-                if let Ok(s) = opts.state.nodes.get(&c.node_name) {
-                    return Some(s.stdout_log());
+                if c.logging_to_stdout() {
+                    return None;
                 }
+                // In the case where a node is explicitly created in foreground mode, we need
+                // to initialize the node directories before we can get the log path.
+                let path = opts
+                    .state
+                    .nodes
+                    .stdout_logs(&c.node_name)
+                    .unwrap_or_else(|_| {
+                        panic!("Failed to initialize logs file for node {}", c.node_name)
+                    });
+                return Some(path);
             }
         }
         None

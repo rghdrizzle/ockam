@@ -1,38 +1,46 @@
 use crate::nodes::service::Alias;
-use ockam::identity::IdentityIdentifier;
-use ockam::remote::RemoteForwarderInfo;
+use ockam::identity::Identifier;
+use ockam::identity::{SecureChannel, SecureChannelListener};
+use ockam::remote::RemoteRelayInfo;
 use ockam_core::compat::collections::BTreeMap;
 use ockam_core::{Address, Route};
-use ockam_identity::{SecureChannel, SecureChannelListener};
+use ockam_node::compat::asynchronous::RwLock;
+use std::borrow::Borrow;
+use std::fmt::Display;
+use std::net::SocketAddr;
 
 #[derive(Default)]
 pub(crate) struct SecureChannelRegistry {
-    channels: Vec<SecureChannelInfo>,
+    channels: RwLock<Vec<SecureChannelInfo>>,
 }
 
 impl SecureChannelRegistry {
-    pub fn get_by_addr(&self, addr: &Address) -> Option<&SecureChannelInfo> {
-        self.channels
+    pub async fn get_by_addr(&self, addr: &Address) -> Option<SecureChannelInfo> {
+        let channels = self.channels.read().await;
+        channels
             .iter()
             .find(|&x| x.sc.encryptor_address() == addr)
+            .cloned()
     }
 
-    pub fn insert(
-        &mut self,
+    pub async fn insert(
+        &self,
         route: Route,
         sc: SecureChannel,
-        authorized_identifiers: Option<Vec<IdentityIdentifier>>,
+        authorized_identifiers: Option<Vec<Identifier>>,
     ) {
-        self.channels
-            .push(SecureChannelInfo::new(route, sc, authorized_identifiers))
+        let mut channels = self.channels.write().await;
+        channels.push(SecureChannelInfo::new(route, sc, authorized_identifiers))
     }
 
-    pub fn remove_by_addr(&mut self, addr: &Address) {
-        self.channels.retain(|x| x.sc().encryptor_address() != addr)
+    pub async fn remove_by_addr(&self, addr: &Address) {
+        let mut channels = self.channels.write().await;
+        channels.retain(|x| x.sc().encryptor_address() != addr)
     }
 
-    pub fn list(&self) -> &[SecureChannelInfo] {
-        &self.channels
+    pub async fn list(&self) -> Vec<SecureChannelInfo> {
+        let channels = self.channels.read().await;
+        channels.clone()
     }
 }
 
@@ -41,14 +49,14 @@ pub struct SecureChannelInfo {
     // Target route of the channel
     route: Route,
     sc: SecureChannel,
-    authorized_identifiers: Option<Vec<IdentityIdentifier>>,
+    authorized_identifiers: Option<Vec<Identifier>>,
 }
 
 impl SecureChannelInfo {
     pub fn new(
         route: Route,
         sc: SecureChannel,
-        authorized_identifiers: Option<Vec<IdentityIdentifier>>,
+        authorized_identifiers: Option<Vec<Identifier>>,
     ) -> Self {
         Self {
             route,
@@ -65,13 +73,13 @@ impl SecureChannelInfo {
         &self.sc
     }
 
-    pub fn authorized_identifiers(&self) -> Option<&Vec<IdentityIdentifier>> {
+    pub fn authorized_identifiers(&self) -> Option<&Vec<Identifier>> {
         self.authorized_identifiers.as_ref()
     }
 }
 
 #[derive(Clone)]
-pub(crate) struct SecureChannelListenerInfo {
+pub struct SecureChannelListenerInfo {
     listener: SecureChannelListener,
 }
 
@@ -85,38 +93,50 @@ impl SecureChannelListenerInfo {
     }
 }
 
-#[derive(Default)]
+#[derive(Default, Clone)]
 pub(crate) struct IdentityServiceInfo {}
 
-#[derive(Default)]
+#[derive(Default, Clone)]
 pub(crate) struct AuthenticatedServiceInfo {}
 
-#[derive(Default)]
+#[derive(Default, Clone)]
 pub(crate) struct OktaIdentityProviderServiceInfo {}
 
-#[derive(Default)]
+#[derive(Default, Clone)]
 pub(crate) struct UppercaseServiceInfo {}
 
-#[derive(Default)]
+#[derive(Default, Clone)]
 pub(crate) struct EchoerServiceInfo {}
 
-#[derive(Default)]
+#[derive(Default, Clone)]
 pub(crate) struct HopServiceInfo {}
 
-#[derive(Default)]
+#[derive(Default, Clone)]
 pub(crate) struct VerifierServiceInfo {}
 
-#[derive(Default)]
+#[derive(Default, Clone)]
 pub(crate) struct CredentialsServiceInfo {}
 
-#[derive(Default)]
-pub(crate) struct AuthenticatorServiceInfo {}
-
+#[derive(Eq, PartialEq, Clone)]
 pub(crate) enum KafkaServiceKind {
     Consumer,
     Producer,
+    Outlet,
+    Direct,
 }
 
+impl Display for KafkaServiceKind {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            KafkaServiceKind::Consumer => write!(f, "consumer"),
+            KafkaServiceKind::Producer => write!(f, "producer"),
+            KafkaServiceKind::Outlet => write!(f, "outlet"),
+            KafkaServiceKind::Direct => write!(f, "direct"),
+        }
+    }
+}
+
+#[derive(Clone)]
 pub(crate) struct KafkaServiceInfo {
     kind: KafkaServiceKind,
 }
@@ -157,19 +177,19 @@ impl InletInfo {
 }
 
 #[derive(Clone)]
-pub(crate) struct OutletInfo {
-    pub(crate) tcp_addr: String,
+pub struct OutletInfo {
+    pub(crate) socket_addr: SocketAddr,
     pub(crate) worker_addr: Address,
 }
 
 impl OutletInfo {
-    pub(crate) fn new(tcp_addr: &str, worker_addr: Option<&Address>) -> Self {
+    pub(crate) fn new(socket_addr: &SocketAddr, worker_addr: Option<&Address>) -> Self {
         let worker_addr = match worker_addr {
             Some(addr) => addr.clone(),
             None => Address::from_string(""),
         };
         Self {
-            tcp_addr: tcp_addr.to_owned(),
+            socket_addr: *socket_addr,
             worker_addr,
         }
     }
@@ -178,21 +198,78 @@ impl OutletInfo {
 #[derive(Default)]
 pub(crate) struct Registry {
     pub(crate) secure_channels: SecureChannelRegistry,
-    pub(crate) secure_channel_listeners: BTreeMap<Address, SecureChannelListenerInfo>,
-    pub(crate) identity_services: BTreeMap<Address, IdentityServiceInfo>,
-    pub(crate) authenticated_services: BTreeMap<Address, AuthenticatedServiceInfo>,
-    pub(crate) okta_identity_provider_services: BTreeMap<Address, OktaIdentityProviderServiceInfo>,
-    pub(crate) uppercase_services: BTreeMap<Address, UppercaseServiceInfo>,
-    pub(crate) echoer_services: BTreeMap<Address, EchoerServiceInfo>,
-    pub(crate) kafka_services: BTreeMap<Address, KafkaServiceInfo>,
-    pub(crate) hop_services: BTreeMap<Address, HopServiceInfo>,
-    pub(crate) verifier_services: BTreeMap<Address, VerifierServiceInfo>,
-    pub(crate) credentials_services: BTreeMap<Address, CredentialsServiceInfo>,
-    #[cfg(feature = "direct-authenticator")]
-    pub(crate) authenticator_service: BTreeMap<Address, AuthenticatorServiceInfo>,
+    pub(crate) secure_channel_listeners: RegistryOf<Address, SecureChannelListenerInfo>,
+    pub(crate) authenticated_services: RegistryOf<Address, AuthenticatedServiceInfo>,
+    pub(crate) uppercase_services: RegistryOf<Address, UppercaseServiceInfo>,
+    pub(crate) echoer_services: RegistryOf<Address, EchoerServiceInfo>,
+    pub(crate) kafka_services: RegistryOf<Address, KafkaServiceInfo>,
+    pub(crate) hop_services: RegistryOf<Address, HopServiceInfo>,
+    pub(crate) credentials_services: RegistryOf<Address, CredentialsServiceInfo>,
+    pub(crate) relays: RegistryOf<String, RemoteRelayInfo>,
+    pub(crate) inlets: RegistryOf<Alias, InletInfo>,
+    pub(crate) outlets: RegistryOf<Alias, OutletInfo>,
+}
 
-    // FIXME: wow this is a terrible way to store data
-    pub(crate) forwarders: BTreeMap<String, RemoteForwarderInfo>,
-    pub(crate) inlets: BTreeMap<Alias, InletInfo>,
-    pub(crate) outlets: BTreeMap<Alias, OutletInfo>,
+pub(crate) struct RegistryOf<K, V> {
+    map: RwLock<BTreeMap<K, V>>,
+}
+
+impl<K, V> Default for RegistryOf<K, V> {
+    fn default() -> Self {
+        RegistryOf {
+            map: RwLock::new(BTreeMap::default()),
+        }
+    }
+}
+
+impl<K: Clone, V: Clone> RegistryOf<K, V> {
+    pub async fn insert(&self, k: K, v: V) -> Option<V>
+    where
+        K: Ord,
+    {
+        let mut map = self.map.write().await;
+        map.insert(k, v)
+    }
+
+    pub async fn get<Q: ?Sized>(&self, key: &Q) -> Option<V>
+    where
+        K: Borrow<Q> + Ord,
+        Q: Ord,
+    {
+        let map = self.map.read().await;
+        map.get(key).cloned()
+    }
+
+    pub async fn keys(&self) -> Vec<K> {
+        let map = self.map.read().await;
+        map.clone().keys().cloned().collect()
+    }
+
+    pub async fn values(&self) -> Vec<V> {
+        let map = self.map.read().await;
+        map.clone().values().cloned().collect()
+    }
+
+    pub async fn entries(&self) -> Vec<(K, V)> {
+        let map = self.map.read().await;
+        map.iter().map(|(k, v)| (k.clone(), v.clone())).collect()
+    }
+
+    pub async fn remove<Q: ?Sized>(&self, key: &Q) -> Option<V>
+    where
+        K: Borrow<Q> + Ord,
+        Q: Ord,
+    {
+        let mut map = self.map.write().await;
+        map.remove(key)
+    }
+
+    pub async fn contains_key<Q: ?Sized>(&self, key: &Q) -> bool
+    where
+        K: Borrow<Q> + Ord,
+        Q: Ord,
+    {
+        let map = self.map.read().await;
+        map.contains_key(key)
+    }
 }

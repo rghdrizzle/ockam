@@ -317,13 +317,24 @@ pub mod vec {
     pub type Vec<T> = heapless::Vec<T, 64>;
 }
 
+/// Provides `std::time` for `std` targets.
+#[cfg(feature = "std")]
+pub mod time {
+    pub use std::time::*;
+}
+
+/// Provides `std::time` for no_std targets
+#[cfg(not(feature = "std"))]
+pub mod time {
+    pub use core::time::Duration;
+}
+
 /// Provides `core::fmt`
 pub mod fmt {
-    pub use alloc::fmt::*;
     #[cfg(feature = "alloc")]
-    pub use alloc::vec::*;
+    pub use alloc::fmt::*;
     #[cfg(not(feature = "alloc"))]
-    pub type Vec<T> = heapless::Vec<T, 64>;
+    pub use core::fmt::*;
 }
 
 /// Provides `future::poll_once`

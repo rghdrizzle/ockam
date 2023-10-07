@@ -1,22 +1,23 @@
 use hello_ockam::{create_token, import_project};
 use ockam::abac::AbacAccessControl;
-use ockam::identity::credential::OneTimeCode;
+use ockam::identity::OneTimeCode;
 use ockam::identity::{
     identities, AuthorityService, RemoteCredentialsRetriever, RemoteCredentialsRetrieverInfo, SecureChannelOptions,
     TrustContext, TrustMultiIdentifiersPolicy,
 };
 use ockam::node;
 use ockam::{route, Context, Result};
-use ockam_api::authenticator::direct::TokenAcceptorClient;
+use ockam_api::authenticator::enrollment_tokens::TokenAcceptor;
+use ockam_api::nodes::NodeManager;
 use ockam_api::{multiaddr_to_route, DefaultAddress};
 use ockam_core::compat::sync::Arc;
-use ockam_node::RpcClient;
+use ockam_multiaddr::MultiAddr;
 use ockam_transport_tcp::{TcpInletOptions, TcpTransportExtension};
 
 /// This node supports an "edge" server which can connect to a "control" node
 /// in order to connect its TCP inlet to the "control" node TCP outlet
 ///
-/// The connections go through the Ockam Orchestrator, via the control node Forwarder.
+/// The connections go through the Ockam Orchestrator, via the control node Relay.
 ///
 /// This example shows how to:
 ///
@@ -54,30 +55,21 @@ async fn start_node(ctx: Context, project_information_path: &str, token: OneTime
     // Create an Identity for the edge plane
     let edge_plane = node.create_identity().await?;
 
-    // 2. create a secure channel to the authority
+    // 2. create a secure channel to the authority node to
     //    to retrieve the node credential
-
-    // Import the authority identity and route from the information file
-    let project = import_project(project_information_path, node.identities()).await?;
-
-    let tcp_authority_route = multiaddr_to_route(&project.authority_route(), &tcp).await.unwrap(); // FIXME: Handle error
-    let options = SecureChannelOptions::new()
-        .with_trust_policy(TrustMultiIdentifiersPolicy::new(vec![project.authority_identifier()]));
-
     // create a secure channel to the authority
     // when creating the channel we check that the opposite side is indeed presenting the authority identity
-    let secure_channel = node
-        .create_secure_channel(&edge_plane, tcp_authority_route.route, options)
-        .await?;
+    let authority_node = NodeManager::authority_node(
+        &tcp,
+        node.secure_channels().clone(),
+        &edge_plane,
+        &MultiAddr::try_from("/dnsaddr/localhost/tcp/5000")?,
+        &node.create_identity().await?,
+    )
+    .await?;
+    authority_node.present_token(node.context(), token).await.unwrap();
 
-    let token_acceptor = TokenAcceptorClient::new(
-        RpcClient::new(
-            route![secure_channel.clone(), DefaultAddress::ENROLLMENT_TOKEN_ACCEPTOR],
-            node.context(),
-        )
-        .await?,
-    );
-    token_acceptor.present_token(&token).await?;
+    let project = import_project(project_information_path, node.identities()).await?;
 
     // Create a trust context that will be used to authenticate credential exchanges
     let tcp_project_session = multiaddr_to_route(&project.route(), &tcp).await.unwrap(); // FIXME: Handle error
@@ -85,7 +77,6 @@ async fn start_node(ctx: Context, project_information_path: &str, token: OneTime
     let trust_context = TrustContext::new(
         "trust_context_id".to_string(),
         Some(AuthorityService::new(
-            node.identities().identities_reader(),
             node.credentials(),
             project.authority_identifier(),
             Some(Arc::new(RemoteCredentialsRetriever::new(
@@ -103,8 +94,6 @@ async fn start_node(ctx: Context, project_information_path: &str, token: OneTime
         .authority()?
         .credential(node.context(), &edge_plane)
         .await?;
-
-    println!("{credential}");
 
     // start a credential exchange worker which will be
     // later on to exchange credentials with the control node
@@ -142,7 +131,7 @@ async fn start_node(ctx: Context, project_information_path: &str, token: OneTime
         )
         .await?;
 
-    // 4.3 then create a secure channel to the control node (via its forwarder)
+    // 4.3 then create a secure channel to the control node (via its relay)
     let secure_channel_listener_route = route![secure_channel_address, "forward_to_control_plane1", "untrusted"];
     let secure_channel_to_control = node
         .create_secure_channel(
@@ -159,7 +148,7 @@ async fn start_node(ctx: Context, project_information_path: &str, token: OneTime
         .present_credential_mutual(
             node.context(),
             route![secure_channel_to_control.clone(), "credential_exchange"],
-            &[project.authority_identity()],
+            &[project.authority_identifier()],
             credential,
         )
         .await?;

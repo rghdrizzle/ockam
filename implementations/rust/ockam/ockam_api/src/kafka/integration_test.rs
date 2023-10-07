@@ -32,10 +32,8 @@ mod test {
     use ockam::Context;
     use ockam_core::async_trait;
     use ockam_core::compat::sync::Arc;
-    use ockam_core::flow_control::FlowControlPolicy;
     use ockam_core::route;
-    use ockam_core::{Address, AllowAll};
-    use ockam_identity::SecureChannelListenerOptions;
+    use ockam_core::Address;
     use ockam_multiaddr::proto::Service;
     use ockam_multiaddr::MultiAddr;
     use ockam_node::compat::tokio;
@@ -43,31 +41,25 @@ mod test {
 
     use crate::hop::Hop;
     use crate::kafka::protocol_aware::utils::{encode_request, encode_response};
-    use crate::kafka::secure_channel_map::ForwarderCreator;
+    use crate::kafka::secure_channel_map::RelayCreator;
     use crate::kafka::{
-        KafkaInletController, KafkaPortalListener, KafkaSecureChannelControllerImpl,
+        ConsumerNodeAddr, KafkaInletController, KafkaPortalListener,
+        KafkaSecureChannelControllerImpl,
     };
-    use crate::nodes::registry::KafkaServiceKind;
-    use crate::test::NodeManagerHandle;
-    use crate::DefaultAddress;
+    use crate::test_utils::NodeManagerHandle;
 
     //TODO: upgrade to 13 by adding a metadata request to map uuid<=>topic_name
     const TEST_KAFKA_API_VERSION: i16 = 12;
 
-    struct HopForwarderCreator {}
+    struct HopRelayCreator {}
 
     #[async_trait]
-    impl ForwarderCreator for HopForwarderCreator {
-        async fn create_forwarder(&self, context: &Context, alias: String) -> ockam::Result<()> {
-            trace!("creating mock forwarder for: {alias}");
+    impl RelayCreator for HopRelayCreator {
+        async fn create_relay(&self, context: &Context, alias: String) -> ockam::Result<()> {
+            trace!("creating mock relay for: {alias}");
             //replicating the same logic of the orchestrator by adding consumer__
             context
-                .start_worker(
-                    Address::from_string(format!("consumer__{alias}")),
-                    Hop,
-                    AllowAll,
-                    AllowAll,
-                )
+                .start_worker(Address::from_string(format!("consumer__{alias}")), Hop)
                 .await?;
             Ok(())
         }
@@ -75,42 +67,16 @@ mod test {
 
     async fn create_kafka_service(
         context: &Context,
-        handle: &NodeManagerHandle,
+        handler: &NodeManagerHandle,
         listener_address: Address,
         outlet_address: Address,
-        kind: KafkaServiceKind,
     ) -> ockam::Result<u16> {
         let secure_channel_controller = KafkaSecureChannelControllerImpl::new_extended(
-            handle.secure_channels.clone(),
-            MultiAddr::try_from("/service/api")?,
-            HopForwarderCreator {},
+            handler.secure_channels.clone(),
+            ConsumerNodeAddr::Relay(MultiAddr::try_from("/service/api")?),
+            Some(HopRelayCreator {}),
+            "test_trust_context_id".to_string(),
         );
-
-        //the possibility to accept secure channels is the only real
-        //difference between consumer and producer
-        if let KafkaServiceKind::Consumer = kind {
-            secure_channel_controller
-                .create_consumer_listener(context)
-                .await?;
-
-            let options = SecureChannelListenerOptions::new();
-            context.flow_controls().add_consumer(
-                crate::kafka::KAFKA_SECURE_CHANNEL_CONTROLLER_ADDRESS,
-                &options.spawner_flow_control_id(),
-                FlowControlPolicy::SpawnerAllowMultipleMessages,
-            );
-
-            // in a normal setup the secure channel listener is already created
-            handle
-                .secure_channels
-                .create_secure_channel_listener(
-                    context,
-                    &handle.identifier,
-                    DefaultAddress::SECURE_CHANNEL_LISTENER,
-                    options,
-                )
-                .await?;
-        }
 
         let mut interceptor_multiaddr = MultiAddr::default();
         interceptor_multiaddr.push_back(Service::new(listener_address.address()))?;
@@ -123,7 +89,7 @@ mod test {
             (0, 0).try_into().unwrap(),
         );
 
-        let (socket_address, _) = handle
+        let (socket_address, _) = handler
             .tcp
             .create_inlet(
                 "127.0.0.1:0",
@@ -148,14 +114,13 @@ mod test {
     async fn producer__flow_with_mock_kafka__content_encryption_and_decryption(
         context: &mut Context,
     ) -> ockam::Result<()> {
-        let handler = crate::util::test::start_manager_for_tests(context).await?;
+        let handler = crate::util::test_utils::start_manager_for_tests(context).await?;
 
         let consumer_bootstrap_port = create_kafka_service(
             context,
             &handler,
             "kafka_consumer_listener".into(),
             "kafka_consumer_outlet".into(),
-            KafkaServiceKind::Consumer,
         )
         .await?;
 
@@ -164,12 +129,11 @@ mod test {
             &handler,
             "kafka_producer_listener".into(),
             "kafka_producer_outlet".into(),
-            KafkaServiceKind::Producer,
         )
         .await?;
 
         //before produce a new key, the consumer has to issue a Fetch request
-        // so the sidecar can react by creating the forwarder for the partition 1 of 'my-topic'
+        // so the sidecar can react by creating the relay for the partition 1 of 'my-topic'
         {
             let mut consumer_mock_kafka = TcpServerSimulator::start("127.0.0.1:0").await;
             handler
@@ -237,6 +201,10 @@ mod test {
                 TcpOutletOptions::new(),
             )
             .await?;
+
+        // give the secure channel between producer and consumer to finish initialization
+        tokio::time::sleep(Duration::from_millis(100)).await;
+
         let plain_fetch_response = simulate_kafka_consumer_and_read_response(
             consumer_bootstrap_port,
             &mut consumer_mock_kafka,
@@ -348,7 +316,7 @@ mod test {
         send_kafka_request(stream, header, request, ApiKey::ProduceKey).await;
     }
 
-    //this is needed in order to make the consumer create the forwarders to the secure
+    //this is needed in order to make the consumer create the relays to the secure
     //channel
     async fn simulate_first_kafka_consumer_empty_reply_and_ignore_result(
         consumer_bootstrap_port: u16,
@@ -360,7 +328,7 @@ mod test {
                 .unwrap();
         send_kafka_fetch_request(&mut kafka_client_connection).await;
         //we don't want the answer, but we need to be sure the
-        // message passed through and the forwarder had been created
+        // message passed through and the relay had been created
         mock_kafka_connection
             .stream
             .read_exact(&mut [0; 4])

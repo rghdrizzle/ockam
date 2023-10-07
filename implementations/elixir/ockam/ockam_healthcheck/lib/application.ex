@@ -4,7 +4,7 @@ defmodule Ockam.Healthcheck.Application do
   """
   use Application
 
-  alias Ockam.Healthcheck.Target
+  alias Ockam.Healthcheck.ScheduledTarget
 
   require Logger
 
@@ -19,34 +19,16 @@ defmodule Ockam.Healthcheck.Application do
     case Jason.decode(config_json) do
       {:ok, targets} when is_list(targets) ->
         Enum.reduce(targets, {:ok, []}, fn
-          target, {:ok, targets} ->
-            case target do
-              %{
-                "name" => name,
-                "host" => host,
-                "port" => port
-              }
-              when is_integer(port) ->
-                api_worker = Map.get(target, "api_worker", "api")
-                healthcheck_worker = Map.get(target, "healthcheck_worker", "healthcheck")
+          map, {:ok, targets} ->
+            case ScheduledTarget.parse(map) do
+              {:ok, scheduled_target} ->
+                {:ok, [scheduled_target | targets]}
 
-                {:ok,
-                 [
-                   %Target{
-                     name: name,
-                     host: host,
-                     port: port,
-                     api_worker: api_worker,
-                     healthcheck_worker: healthcheck_worker
-                   }
-                   | targets
-                 ]}
-
-              other ->
-                {:error, {:invalid_target, other}}
+              {:error, reason} ->
+                {:error, reason}
             end
 
-          _target, {:error, reason} ->
+          _map, {:error, reason} ->
             {:error, reason}
         end)
 
@@ -59,26 +41,20 @@ defmodule Ockam.Healthcheck.Application do
   end
 
   def healthcheck_schedule() do
-    tab = Application.get_env(:ockam_healthcheck, :crontab)
+    targets = Application.get_env(:ockam_healthcheck, :targets, [])
 
-    case tab do
-      nil ->
-        []
-
-      _string ->
-        [
-          %{
-            id: "healthcheck_schedule",
-            start:
-              {SchedEx, :run_every,
-               [
-                 Ockam.Healthcheck,
-                 :check_targets,
-                 [],
-                 tab
-               ]}
-          }
-        ]
-    end
+    Enum.map(targets, fn %ScheduledTarget{target: target, crontab: crontab} ->
+      %{
+        id: "#{target.name}_healthcheck_schedule",
+        start:
+          {SchedEx, :run_every,
+           [
+             Ockam.Healthcheck,
+             :check_target,
+             [target],
+             crontab
+           ]}
+      }
+    end)
   end
 end

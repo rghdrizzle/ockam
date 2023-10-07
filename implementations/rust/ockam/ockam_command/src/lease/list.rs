@@ -1,40 +1,25 @@
-use std::str::FromStr;
-
 use clap::Args;
+use colorful::Colorful;
+use miette::IntoDiagnostic;
+use std::fmt::Write;
 
 use ockam::Context;
 use ockam_api::cloud::lease_manager::models::influxdb::Token;
-use ockam_core::api::Request;
-use ockam_multiaddr::MultiAddr;
-use termimad::{minimad::TextTemplate, MadSkin};
+use ockam_api::InfluxDbTokenLease;
+use time::format_description::well_known::Iso8601;
+use time::PrimitiveDateTime;
+use tokio::sync::Mutex;
+use tokio::try_join;
 
-use crate::identity::{get_identity_name, initialize_identity_if_default};
-use crate::{
-    docs,
-    util::{
-        api::{CloudOpts, TrustContextOpts},
-        node_rpc,
-        orchestrator_api::OrchestratorApiBuilder,
-    },
-    CommandGlobalOpts,
-};
+use crate::identity::initialize_identity_if_default;
+use crate::lease::authenticate;
+use crate::output::Output;
+use crate::terminal::OckamColor;
+use crate::util::api::{CloudOpts, TrustContextOpts};
+use crate::util::node_rpc;
+use crate::{docs, CommandGlobalOpts};
 
 const HELP_DETAIL: &str = "";
-
-const LIST_VIEW: &str = r#"
-## Tokens
-
-${token
-> **ID:** ${id}
-> **Issued For:** ${issued_for}
-> **Created At:** ${created_at}
-> **Expires At:** ${expires_at}
-> **Token:** ${token}
-> **Status:** ${status}
-
-
-}
-"#;
 
 /// List tokens within the lease token manager
 #[derive(Clone, Debug, Args)]
@@ -51,45 +36,63 @@ impl ListCommand {
 async fn run_impl(
     ctx: Context,
     (opts, cloud_opts, trust_opts): (CommandGlobalOpts, CloudOpts, TrustContextOpts),
-) -> crate::Result<()> {
-    let identity = get_identity_name(&opts.state, &cloud_opts.identity);
-    let mut orchestrator_client = OrchestratorApiBuilder::new(&ctx, &opts, &trust_opts)
-        .as_identity(identity)
-        .with_new_embbeded_node()
-        .await?
-        .build(&MultiAddr::from_str("/service/influxdb_token_lease")?)
-        .await?;
+) -> miette::Result<()> {
+    let is_finished: Mutex<bool> = Mutex::new(false);
+    let project_node = authenticate(&ctx, &opts, &cloud_opts, &trust_opts).await?;
 
-    let req = Request::get("/");
+    let send_req = async {
+        let tokens: Vec<Token> = project_node.list_tokens(&ctx).await?;
+        *is_finished.lock().await = true;
+        Ok(tokens)
+    };
 
-    let resp_leases: Vec<Token> = orchestrator_client.request_with_response(req).await?;
+    let output_messages = vec![format!("Listing Tokens...\n")];
 
-    let token_template = TextTemplate::from(LIST_VIEW);
-    let mut expander = token_template.expander();
+    let progress_output = opts
+        .terminal
+        .progress_output(&output_messages, &is_finished);
 
-    resp_leases.iter().for_each(
-        |Token {
-             id,
-             issued_for,
-             created_at,
-             expires,
-             token,
-             status,
-         }| {
-            expander
-                .sub("token")
-                .set("id", id)
-                .set("issued_for", issued_for)
-                .set("created_at", created_at)
-                .set("expires_at", expires)
-                .set("token", token)
-                .set("status", status);
-        },
-    );
+    let (tokens, _) = try_join!(send_req, progress_output)?;
 
-    let skin = MadSkin::default();
-
-    skin.print_expander(expander);
-
+    let plain =
+        opts.terminal
+            .build_list(&tokens, "Tokens", "No active tokens found within service.")?;
+    let json = serde_json::to_string_pretty(&tokens).into_diagnostic()?;
+    opts.terminal
+        .stdout()
+        .plain(plain)
+        .json(json)
+        .write_line()?;
     Ok(())
+}
+
+impl Output for Token {
+    fn output(&self) -> crate::error::Result<String> {
+        let mut output = String::new();
+        let status = match self.status.as_str() {
+            "active" => self
+                .status
+                .to_uppercase()
+                .color(OckamColor::Success.color()),
+            _ => self
+                .status
+                .to_uppercase()
+                .color(OckamColor::Failure.color()),
+        };
+        let expires_at = {
+            PrimitiveDateTime::parse(&self.expires, &Iso8601::DEFAULT)?
+                .to_string()
+                .color(OckamColor::PrimaryResource.color())
+        };
+        let id = self
+            .id
+            .to_string()
+            .color(OckamColor::PrimaryResource.color());
+
+        writeln!(output, "Token {id}")?;
+        writeln!(output, "Expires {expires_at} {status}")?;
+        write!(output, "{}", self.token)?;
+
+        Ok(output)
+    }
 }

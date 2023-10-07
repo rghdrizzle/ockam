@@ -3,22 +3,12 @@ use clap::Args;
 use colorful::Colorful;
 
 use ockam::Context;
-use ockam_api::cli_state::{StateDirTrait, StateItemTrait};
-use ockam_api::cloud::addon::ConfluentConfig;
-use ockam_api::cloud::operation::CreateOperationResponse;
-use ockam_api::cloud::project::Project;
-use ockam_api::cloud::CloudRequestWrapper;
-use ockam_core::api::Request;
-use ockam_core::CowStr;
+use ockam_api::cloud::addon::{Addons, ConfluentConfig};
+use ockam_api::nodes::InMemoryNode;
 
-use crate::node::util::delete_embedded_node;
-use crate::operation::util::check_for_completion;
-use crate::project::addon::configure_addon_endpoint;
-use crate::project::util::check_project_readiness;
-use crate::util::api::CloudOpts;
-
-use crate::util::{api, node_rpc, Rpc};
-use crate::{docs, fmt_ok, CommandGlobalOpts, Result};
+use crate::project::addon::{check_configuration_completion, get_project_id};
+use crate::util::node_rpc;
+use crate::{docs, fmt_ok, CommandGlobalOpts};
 
 const LONG_ABOUT: &str = include_str!("./static/configure_confluent/long_about.txt");
 const AFTER_LONG_HELP: &str = include_str!("./static/configure_confluent/after_long_help.txt");
@@ -26,8 +16,8 @@ const AFTER_LONG_HELP: &str = include_str!("./static/configure_confluent/after_l
 /// Configure the Confluent Cloud addon for a project
 #[derive(Clone, Debug, Args)]
 #[command(
-    long_about = docs::about(LONG_ABOUT),
-    after_long_help = docs::after_help(AFTER_LONG_HELP),
+long_about = docs::about(LONG_ABOUT),
+after_long_help = docs::after_help(AFTER_LONG_HELP),
 )]
 pub struct AddonConfigureConfluentSubcommand {
     /// Ockam project name
@@ -51,54 +41,32 @@ pub struct AddonConfigureConfluentSubcommand {
 }
 
 impl AddonConfigureConfluentSubcommand {
-    pub fn run(self, opts: CommandGlobalOpts, cloud_opts: CloudOpts) {
-        node_rpc(run_impl, (opts, cloud_opts, self));
+    pub fn run(self, opts: CommandGlobalOpts) {
+        node_rpc(run_impl, (opts, self));
     }
 }
 
 async fn run_impl(
     ctx: Context,
-    (opts, cloud_opts, cmd): (
-        CommandGlobalOpts,
-        CloudOpts,
-        AddonConfigureConfluentSubcommand,
-    ),
-) -> Result<()> {
-    let controller_route = &cloud_opts.route();
+    (opts, cmd): (CommandGlobalOpts, AddonConfigureConfluentSubcommand),
+) -> miette::Result<()> {
     let AddonConfigureConfluentSubcommand {
         project_name,
         bootstrap_server,
     } = cmd;
+    let project_id = get_project_id(&opts.state, project_name.as_str())?;
+    let config = ConfluentConfig::new(bootstrap_server);
 
-    let mut rpc = Rpc::embedded(&ctx, &opts).await?;
-    let body = ConfluentConfig::new(bootstrap_server);
-    let addon_id = "confluent";
-    let endpoint = format!(
-        "{}/{}",
-        configure_addon_endpoint(&opts.state, &project_name)?,
-        addon_id
-    );
-    let req = Request::post(endpoint).body(CloudRequestWrapper::new(
-        body,
-        controller_route,
-        None::<CowStr>,
-    ));
-    rpc.request(req).await?;
-    let res = rpc.parse_response::<CreateOperationResponse>()?;
-    let operation_id = res.operation_id;
+    let node = InMemoryNode::start(&ctx, &opts.state).await?;
+    let controller = node.create_controller().await?;
 
-    check_for_completion(&ctx, &opts, &cloud_opts, rpc.node_name(), &operation_id).await?;
-
-    let project_id = opts.state.projects.get(&project_name)?.config().id.clone();
-    let mut rpc = rpc.clone();
-    rpc.request(api::project::show(&project_id, controller_route))
+    let response = controller
+        .configure_confluent_addon(&ctx, project_id.clone(), config)
         .await?;
-    let project: Project = rpc.parse_response()?;
-    check_project_readiness(&ctx, &opts, &cloud_opts, rpc.node_name(), None, project).await?;
+    check_configuration_completion(&opts, &ctx, &node, project_id, response.operation_id).await?;
 
     opts.terminal
         .write_line(&fmt_ok!("Confluent addon configured successfully"))?;
 
-    delete_embedded_node(&opts, rpc.node_name()).await;
     Ok(())
 }

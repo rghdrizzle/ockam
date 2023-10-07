@@ -1,15 +1,14 @@
 use crate::error::ApiError;
 use core::str;
 use minicbor::Decoder;
-use ockam::identity::credential::Timestamp;
+use ockam::identity::utils::now;
+use ockam::identity::TRUST_CONTEXT_ID;
 use ockam::identity::{
-    AttributesEntry, IdentityAttributesWriter, IdentityIdentifier, IdentitySecureChannelLocalInfo,
+    AttributesEntry, Identifier, IdentityAttributesWriter, IdentitySecureChannelLocalInfo,
 };
-use ockam_core::api;
-use ockam_core::api::{Method, Request, Response};
+use ockam_core::api::{Method, RequestHeader, Response};
 use ockam_core::compat::sync::Arc;
 use ockam_core::{self, Result, Routed, Worker};
-use ockam_identity::{LEGACY_ID, TRUST_CONTEXT_ID};
 use ockam_node::Context;
 use reqwest::StatusCode;
 use std::collections::HashMap;
@@ -34,8 +33,8 @@ impl Worker for Server {
             c.send(m.return_route(), r).await
         } else {
             let mut dec = Decoder::new(m.as_body());
-            let req: Request = dec.decode()?;
-            let res = api::forbidden(&req, "secure channel required").to_vec()?;
+            let req: RequestHeader = dec.decode()?;
+            let res = Response::forbidden(&req, "secure channel required").to_vec()?;
             c.send(m.return_route(), res).await
         }
     }
@@ -47,10 +46,10 @@ impl Server {
         project: String,
         tenant_base_url: &str,
         certificate: &str,
-        attributes: &[&str],
+        attributes: &[String],
     ) -> Result<Self> {
         let certificate = reqwest::Certificate::from_pem(certificate.as_bytes())
-            .map_err(|err| ApiError::generic(&err.to_string()))?;
+            .map_err(|err| ApiError::core(err.to_string()))?;
         Ok(Server {
             attributes_writer,
             project,
@@ -60,9 +59,9 @@ impl Server {
         })
     }
 
-    async fn on_request(&mut self, from: &IdentityIdentifier, data: &[u8]) -> Result<Vec<u8>> {
+    async fn on_request(&mut self, from: &Identifier, data: &[u8]) -> Result<Vec<u8>> {
         let mut dec = Decoder::new(data);
-        let req: Request = dec.decode()?;
+        let req: RequestHeader = dec.decode()?;
 
         trace! {
             target: "ockam_api::okta::server",
@@ -80,8 +79,7 @@ impl Server {
                     debug!("Checking token for project {:?}", self.project);
                     // TODO: check token_type
                     // TODO: it's AuthenticateAuth0Token or something else?.  Probably rename.
-                    let token: crate::cloud::enroll::auth0::AuthenticateAuth0Token =
-                        dec.decode()?;
+                    let token: crate::cloud::enroll::auth0::AuthenticateOidcToken = dec.decode()?;
                     debug!("device code received: {token:#?}");
                     if let Some(attrs) = self.check_token(&token.access_token.0).await? {
                         //TODO in some future, we will want to track that this entry
@@ -91,31 +89,28 @@ impl Server {
                         let entry = AttributesEntry::new(
                             attrs
                                 .into_iter()
-                                .map(|(k, v)| (k, v.as_bytes().to_vec()))
+                                .map(|(k, v)| (k.as_bytes().to_vec(), v.as_bytes().to_vec()))
                                 .chain(
-                                    [
-                                        (LEGACY_ID.to_owned(), self.project.as_bytes().to_vec()),
-                                        (
-                                            TRUST_CONTEXT_ID.to_owned(),
-                                            self.project.as_bytes().to_vec(),
-                                        ),
-                                    ]
+                                    [(
+                                        TRUST_CONTEXT_ID.to_owned(),
+                                        self.project.as_bytes().to_vec(),
+                                    )]
                                     .into_iter(),
                                 )
                                 .collect(),
-                            Timestamp::now().unwrap(),
+                            now().unwrap(),
                             None,
                             None,
                         );
                         self.attributes_writer.put_attributes(from, entry).await?;
-                        Response::ok(req.id()).to_vec()?
+                        Response::ok(&req).to_vec()?
                     } else {
-                        api::forbidden(&req, "Forbidden").to_vec()?
+                        Response::forbidden(&req, "Forbidden").to_vec()?
                     }
                 }
-                _ => api::unknown_path(&req).to_vec()?,
+                _ => Response::unknown_path(&req).to_vec()?,
             },
-            _ => api::invalid_method(&req).to_vec()?,
+            _ => Response::invalid_method(&req).to_vec()?,
         };
         Ok(res)
     }
@@ -125,7 +120,7 @@ impl Server {
             .tls_built_in_root_certs(false)
             .add_root_certificate(self.certificate.clone())
             .build()
-            .map_err(|err| ApiError::generic(&err.to_string()))?;
+            .map_err(|err| ApiError::core(err.to_string()))?;
         let res = client
             .get(format!("{}/v1/userinfo", &self.tenant_base_url))
             .header("Authorization", format!("Bearer {token}"))
@@ -139,7 +134,7 @@ impl Server {
                     let doc: HashMap<String, serde_json::Value> = res
                         .json()
                         .await
-                        .map_err(|_err| ApiError::generic("Failed to authenticate with Okta"))?;
+                        .map_err(|_err| ApiError::core("Failed to authenticate with Okta"))?;
                     debug!("userinfo received: {doc:?}");
                     let mut custom_attrs = HashMap::new();
                     for a in self.attributes.iter() {

@@ -1,6 +1,5 @@
 {
   config,
-  inputs,
   lib,
   ...
 }: let
@@ -12,10 +11,6 @@ in {
       nodeVersion = mkOption {
         type = types.str;
         default = "18_x";
-      };
-      pnpmVersion = mkOption {
-        type = types.str;
-        default = "6.7.6";
       };
     };
   };
@@ -30,10 +25,17 @@ in {
     }: {
       devShells = {
         typescript = pkgs.mkShell {
-          buildInputs = [
-            pkgs.nodejs
-            (pkgs.nodePackages.pnpm.override { version = cfg.pnpmVersion; })
-          ];
+          buildInputs = with config.packages; [nodejs pnpm];
+        };
+      };
+
+      packages = {
+        nodejs =
+          if pkgs ? "nodejs-${cfg.nodeVersion}"
+          then pkgs."nodejs-${cfg.nodeVersion}"
+          else throw "unsupported nodejs version for nixpkgs: ${cfg.nodeVersion}";
+        pnpm = pkgs.nodePackages.pnpm.override {
+          node = config.packages.nodejs;
         };
       };
     };

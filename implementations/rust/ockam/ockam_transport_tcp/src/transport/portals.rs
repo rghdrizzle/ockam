@@ -1,6 +1,6 @@
 use crate::portal::TcpInletListenProcessor;
 use crate::transport::common::{parse_socket_addr, resolve_peer};
-use crate::{TcpInletOptions, TcpOutletListenWorker, TcpOutletOptions, TcpTransport};
+use crate::{portal::TcpOutletListenWorker, TcpInletOptions, TcpOutletOptions, TcpTransport};
 use ockam_core::compat::net::SocketAddr;
 use ockam_core::{Address, Result, Route};
 
@@ -92,6 +92,19 @@ impl TcpTransport {
             options,
         )
         .await?;
+
+        Ok(())
+    }
+
+    /// Create Tcp Outlet Listener at address, that connects to peer using Tcp
+    pub async fn create_tcp_outlet(
+        &self,
+        address: Address,
+        peer: SocketAddr,
+        options: TcpOutletOptions,
+    ) -> Result<()> {
+        TcpOutletListenWorker::start(&self.ctx, self.registry.clone(), address, peer, options)
+            .await?;
 
         Ok(())
     }

@@ -1,12 +1,14 @@
 use clap::Args;
+use colorful::Colorful;
 
 use ockam::Context;
+use ockam_api::nodes::models::secure_channel::DeleteSecureChannelListenerResponse;
+use ockam_api::nodes::BackgroundNode;
 use ockam_core::Address;
 
-use crate::node::{get_node_name, initialize_node_if_default};
-use crate::secure_channel::listener::utils::SecureChannelListenerNodeOpts;
-use crate::util::{api, extract_address_value, node_rpc, Rpc};
-use crate::{docs, CommandGlobalOpts};
+use crate::node::{get_node_name, initialize_node_if_default, NodeOpts};
+use crate::util::{api, node_rpc, parse_node_name};
+use crate::{docs, fmt_ok, CommandGlobalOpts};
 
 const LONG_ABOUT: &str = include_str!("./static/delete/long_about.txt");
 const AFTER_LONG_HELP: &str = include_str!("./static/delete/after_long_help.txt");
@@ -19,38 +21,40 @@ const AFTER_LONG_HELP: &str = include_str!("./static/delete/after_long_help.txt"
     after_long_help = docs::after_help(AFTER_LONG_HELP),
 )]
 pub struct DeleteCommand {
-    /// Address at which the channel listener to be deleted is running (required)
+    /// Address at which the channel listener to be deleted is running
     address: Address,
 
     #[command(flatten)]
-    node_opts: SecureChannelListenerNodeOpts,
+    node_opts: NodeOpts,
 }
 
 impl DeleteCommand {
     pub fn run(self, opts: CommandGlobalOpts) {
-        initialize_node_if_default(&opts, &self.node_opts.at);
+        initialize_node_if_default(&opts, &self.node_opts.at_node);
         node_rpc(rpc, (opts, self));
     }
 }
 
-async fn rpc(ctx: Context, (opts, cmd): (CommandGlobalOpts, DeleteCommand)) -> crate::Result<()> {
+async fn rpc(ctx: Context, (opts, cmd): (CommandGlobalOpts, DeleteCommand)) -> miette::Result<()> {
     run_impl(&ctx, (opts, cmd)).await
 }
 
 async fn run_impl(
     ctx: &Context,
     (opts, cmd): (CommandGlobalOpts, DeleteCommand),
-) -> crate::Result<()> {
-    let at = get_node_name(&opts.state, &cmd.node_opts.at);
-    let node = extract_address_value(&at)?;
-    let mut rpc = Rpc::background(ctx, &opts, &node)?;
+) -> miette::Result<()> {
+    let at = get_node_name(&opts.state, &cmd.node_opts.at_node);
+    let node_name = parse_node_name(&at)?;
+    let node = BackgroundNode::create(ctx, &opts.state, &node_name).await?;
     let req = api::delete_secure_channel_listener(&cmd.address);
-    rpc.request(req).await?;
-    rpc.is_ok()?;
-
-    println!(
-        "Deleted secure-channel listener with address '/service/{}' on node '{node}'",
-        cmd.address.address()
-    );
+    let response: DeleteSecureChannelListenerResponse = node.ask(ctx, req).await?;
+    let addr = response.addr;
+    opts.terminal
+        .stdout()
+        .plain(fmt_ok!(
+            "Deleted secure-channel listener with address '{addr}' on node '{node_name}'"
+        ))
+        .machine(addr)
+        .write_line()?;
     Ok(())
 }

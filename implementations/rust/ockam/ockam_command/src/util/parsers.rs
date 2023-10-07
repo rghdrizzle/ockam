@@ -1,65 +1,90 @@
-use crate::Result;
-use anyhow::anyhow;
-use std::net::{Ipv4Addr, SocketAddr};
+use std::net::SocketAddr;
+use std::str::FromStr;
 
-/// Helper fn for parsing ip and port from user input
-/// It can parse a string containing either an `ip:port` pair or just a `port`
-/// into a valid SocketAddr instance.
+use miette::miette;
+
+use ockam::identity::Identifier;
+use ockam_transport_tcp::resolve_peer;
+
+use crate::Result;
+
+/// Helper function for parsing a socket from user input
+/// It is possible to just input a `port`. In that case the address will be assumed to be
+/// 127.0.0.1:<port>
 pub(crate) fn socket_addr_parser(input: &str) -> Result<SocketAddr> {
     let addr: Vec<&str> = input.split(':').collect();
-    match addr.len() {
+
+    let address = match addr.len() {
         // Only the port is available
-        1 => {
-            let port: u16 = addr[0]
-                .parse()
-                .map_err(|_| anyhow!("Invalid port number"))?;
-            let ip: Ipv4Addr = [127, 0, 0, 1].into();
-            Ok(SocketAddr::new(ip.into(), port))
-        }
+        1 => format!("127.0.0.1:{}", addr[0]),
         // Both the ip and port are available
-        2 => {
-            let port: u16 = addr[1]
-                .parse()
-                .map_err(|_| anyhow!("Invalid port number"))?;
-            let ip = addr[0]
-                .parse::<Ipv4Addr>()
-                .map_err(|_| anyhow!("Invalid IP address"))?;
-            Ok(SocketAddr::new(ip.into(), port))
-        }
-        _ => Err(anyhow!("Argument {} is an invalid IP Address or Port", input).into()),
-    }
+        _ => input.to_string(),
+    };
+    Ok(resolve_peer(address.to_string())
+        .map_err(|e| miette!("cannot parse the address {address} as a socket address: {e}"))?)
+}
+
+/// Helper fn for parsing an identity from user input by using
+/// [`ockam_identity::Identifier::from_str()`]
+pub(crate) fn identity_identifier_parser(input: &str) -> Result<Identifier> {
+    Identifier::from_str(input).map_err(|_| miette!("Invalid identity identifier: {input}").into())
 }
 
 #[cfg(test)]
 mod tests {
+    use std::net::Ipv6Addr;
+
     use ockam_core::compat::net::{IpAddr, Ipv4Addr, SocketAddr};
 
-    use crate::util::parsers::socket_addr_parser;
+    use super::*;
 
     #[test]
-    fn test_parse_bootstrap_server() {
-        // Test case 1: only a port is provided
+    fn test_parse_port_only() {
         let input = "9000";
         let result = socket_addr_parser(input);
         assert!(result.is_ok());
-        if let Ok(bootstrap_server) = result {
-            assert_eq!(
-                SocketAddr::new(IpAddr::V4(Ipv4Addr::new(127, 0, 0, 1)), 9000),
-                bootstrap_server
-            );
-        }
+        assert_eq!(
+            SocketAddr::new(IpAddr::V4(Ipv4Addr::new(127, 0, 0, 1)), 9000),
+            result.unwrap()
+        );
+    }
 
-        // Test case 2: Any 4 octet combination (IPv4) followed by ":" like in "192.168.0.1:9999"
+    #[test]
+    fn test_ipv4_and_port() {
         let input = "192.168.0.1:9999";
         let result = socket_addr_parser(input);
         assert!(result.is_ok());
-        if let Ok(bootstrap_server) = result {
-            assert_eq!(
-                SocketAddr::new(IpAddr::V4(Ipv4Addr::new(192, 168, 0, 1)), 9999),
-                bootstrap_server
-            );
-        }
+        assert_eq!(
+            SocketAddr::new(IpAddr::V4(Ipv4Addr::new(192, 168, 0, 1)), 9999),
+            result.unwrap()
+        );
+    }
 
+    #[test]
+    fn test_ipv6_and_port() {
+        let input = "[::1]:9999";
+        let result = socket_addr_parser(input);
+        assert!(result.is_ok());
+        assert_eq!(
+            SocketAddr::new(IpAddr::V6(Ipv6Addr::new(0, 0, 0, 0, 0, 0, 0, 1)), 9999),
+            result.unwrap()
+        );
+    }
+
+    #[test]
+    fn test_localhost() {
+        let input = "localhost:9999";
+        let result = socket_addr_parser(input);
+        assert!(result.is_ok());
+        assert!(result.is_ok());
+        assert_eq!(
+            SocketAddr::new(IpAddr::V4(Ipv4Addr::new(127, 0, 0, 1)), 9999),
+            result.unwrap()
+        );
+    }
+
+    #[test]
+    fn test_invalid_inputs() {
         // Test case 3: Any other format will throw an error
         let invalid_input = "invalid";
         assert!(socket_addr_parser(invalid_input).is_err());

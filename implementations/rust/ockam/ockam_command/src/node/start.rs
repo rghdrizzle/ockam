@@ -1,16 +1,18 @@
 use clap::Args;
-
 use colorful::Colorful;
-use ockam::TcpTransport;
+
 use ockam_api::cli_state::{StateDirTrait, StateItemTrait};
+use ockam_api::nodes::BackgroundNode;
+use ockam_node::Context;
 
 use crate::node::show::print_query_status;
 use crate::node::util::{check_default, spawn_node};
 use crate::node::{get_node_name, initialize_node_if_default};
-use crate::util::{node_rpc, RpcBuilder};
+use crate::util::node_rpc;
 use crate::{docs, fmt_err, CommandGlobalOpts};
 
 const LONG_ABOUT: &str = include_str!("./static/start/long_about.txt");
+const PREVIEW_TAG: &str = include_str!("../static/preview_tag.txt");
 const AFTER_LONG_HELP: &str = include_str!("./static/start/after_long_help.txt");
 
 /// Start a node that was previously stopped
@@ -18,11 +20,11 @@ const AFTER_LONG_HELP: &str = include_str!("./static/start/after_long_help.txt")
 #[command(
     arg_required_else_help = true,
     long_about = docs::about(LONG_ABOUT),
+    before_help = docs::before_help(PREVIEW_TAG),
     after_long_help = docs::after_help(AFTER_LONG_HELP)
 )]
 pub struct StartCommand {
-    /// Name of the node.
-    #[arg()]
+    /// Name of the node to be started
     node_name: Option<String>,
 
     #[arg(long, default_value = "false")]
@@ -37,9 +39,9 @@ impl StartCommand {
 }
 
 async fn run_impl(
-    ctx: ockam::Context,
-    (opts, cmd): (CommandGlobalOpts, StartCommand),
-) -> crate::Result<()> {
+    ctx: Context,
+    (mut opts, cmd): (CommandGlobalOpts, StartCommand),
+) -> miette::Result<()> {
     let node_name = get_node_name(&opts.state, &cmd.node_name);
 
     let node_state = opts.state.nodes.get(&node_name)?;
@@ -56,29 +58,29 @@ async fn run_impl(
     }
     node_state.kill_process(false)?;
     let node_setup = node_state.config().setup();
+    opts.global_args.verbose = node_setup.verbose;
 
     // Restart node
     spawn_node(
         &opts,
-        node_setup.verbose, // Previously user-chosen verbosity level
-        &node_name,         // The selected node name
-        &node_setup.default_tcp_listener()?.addr.to_string(), // The selected node api address
-        None,               // No project information available
-        None,               // No trusted identities
-        None,               // "
-        None,               // "
-        None,               // Launch config
-        None,               // Authority Identity
-        None,               // Credential
-        None,               // Trust Context
-        None,               // Project Name
+        &node_name,                                    // The selected node name
+        &node_setup.api_transport()?.addr.to_string(), // The selected node api address
+        None,                                          // No project information available
+        None,                                          // No trusted identities
+        None,                                          // "
+        None,                                          // "
+        None,                                          // Launch config
+        None,                                          // Authority Identity
+        None,                                          // Credential
+        None,                                          // Trust Context
+        None,                                          // Project Name
+        true,                                          // Restarted nodes will log to files
     )?;
 
     // Print node status
-    let tcp = TcpTransport::create(&ctx).await?;
-    let mut rpc = RpcBuilder::new(&ctx, &opts, &node_name).tcp(&tcp)?.build();
+    let mut node = BackgroundNode::create(&ctx, &opts.state, &node_name).await?;
     let is_default = check_default(&opts, &node_name);
-    print_query_status(&mut rpc, &node_name, true, is_default).await?;
+    print_query_status(&opts, &ctx, &node_name, &mut node, true, is_default).await?;
 
     Ok(())
 }

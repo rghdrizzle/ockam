@@ -2,17 +2,10 @@
 
 # ===== SETUP
 
-setup_file() {
-  load load/base.bash
-}
-
 setup() {
   load load/base.bash
-  load load/orchestrator.bash
   load_bats_ext
   setup_home_dir
-  skip_if_orchestrator_tests_not_enabled
-  copy_local_orchestrator_data
 }
 
 teardown() {
@@ -21,7 +14,7 @@ teardown() {
 
 # ===== TESTS
 
-@test "spaces - list" {
-  run "$OCKAM" space list
-  assert_success
+@test "spaces - fail with human readable error if not enrolled" {
+  run_failure "$OCKAM" space create
+  assert_output --partial "Please enroll using 'ockam enroll' before using this command"
 }

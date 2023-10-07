@@ -1,18 +1,32 @@
-use crate::node::{get_node_name, initialize_node_if_default, NodeOpts};
-use crate::util::{extract_address_value, node_rpc, Rpc};
-use crate::{docs, CommandGlobalOpts};
-use anyhow::Context;
-use clap::Args;
-use cli_table::{print_stdout, Cell, Style, Table};
-use ockam_api::nodes::models;
-use ockam_api::nodes::models::transport::TransportStatus;
-use ockam_core::api::Request;
+use std::fmt::Write;
 
+use clap::Args;
+use colorful::Colorful;
+use miette::miette;
+use tokio::sync::Mutex;
+use tokio::try_join;
+
+use ockam_api::address::extract_address_value;
+use ockam_api::cli_state::StateDirTrait;
+use ockam_api::nodes::models::transport::{TransportList, TransportStatus};
+use ockam_api::nodes::BackgroundNode;
+use ockam_core::api::Request;
+use ockam_node::Context;
+
+use crate::node::{get_node_name, initialize_node_if_default, NodeOpts};
+use crate::output::Output;
+use crate::terminal::OckamColor;
+use crate::util::node_rpc;
+use crate::{docs, CommandGlobalOpts};
+
+const PREVIEW_TAG: &str = include_str!("../../static/preview_tag.txt");
 const AFTER_LONG_HELP: &str = include_str!("./static/list/after_long_help.txt");
 
 /// List TCP connections
 #[derive(Args, Clone, Debug)]
-#[command(after_long_help = docs::after_help(AFTER_LONG_HELP))]
+#[command(
+before_help = docs::before_help(PREVIEW_TAG),
+after_long_help = docs::after_help(AFTER_LONG_HELP))]
 pub struct ListCommand {
     #[command(flatten)]
     node_opts: NodeOpts,
@@ -26,52 +40,90 @@ impl ListCommand {
 }
 
 async fn run_impl(
-    ctx: ockam::Context,
+    ctx: Context,
     (opts, cmd): (CommandGlobalOpts, ListCommand),
-) -> crate::Result<()> {
+) -> miette::Result<()> {
     let node_name = get_node_name(&opts.state, &cmd.node_opts.at_node);
     let node_name = extract_address_value(&node_name)?;
-    let mut rpc = Rpc::background(&ctx, &opts, &node_name)?;
-    rpc.request(Request::get("/node/tcp/connection")).await?;
-    let response = rpc.parse_response::<models::transport::TransportList>()?;
 
-    let table = response
-        .list
-        .iter()
-        .fold(
-            vec![],
-            |mut acc,
-             TransportStatus {
-                 tt,
-                 tm,
-                 socket_addr,
-                 worker_addr,
-                 processor_address,
-                 flow_control_id,
-                 ..
-             }| {
-                let row = vec![
-                    tt.cell(),
-                    tm.cell(),
-                    socket_addr.cell(),
-                    worker_addr.cell(),
-                    processor_address.cell(),
-                    flow_control_id.cell(),
-                ];
-                acc.push(row);
-                acc
-            },
-        )
-        .table()
-        .title(vec![
-            "Type".cell().bold(true),
-            "Mode".cell().bold(true),
-            "Socket address".cell().bold(true),
-            "Worker address".cell().bold(true),
-            "Processor address".cell().bold(true),
-            "Flow Control Id".cell().bold(true),
-        ]);
+    if !opts.state.nodes.get(&node_name)?.is_running() {
+        return Err(miette!("The node '{}' is not running", node_name));
+    }
 
-    print_stdout(table).context("failed to print node status")?;
+    let node = BackgroundNode::create(&ctx, &opts.state, &node_name).await?;
+    let is_finished: Mutex<bool> = Mutex::new(false);
+
+    let get_transports = async {
+        let transports: TransportList =
+            node.ask(&ctx, Request::get("/node/tcp/connection")).await?;
+        *is_finished.lock().await = true;
+        Ok(transports)
+    };
+
+    let output_messages = vec![format!(
+        "Listing TCP Connections on {}...\n",
+        node_name
+            .to_string()
+            .color(OckamColor::PrimaryResource.color())
+    )];
+
+    let progress_output = opts
+        .terminal
+        .progress_output(&output_messages, &is_finished);
+
+    let (transports, _) = try_join!(get_transports, progress_output)?;
+
+    let list = opts.terminal.build_list(
+        &transports.list,
+        &format!("TCP Connections on {}", node_name),
+        &format!(
+            "No TCP Connections found on {}",
+            node_name
+                .to_string()
+                .color(OckamColor::PrimaryResource.color())
+        ),
+    )?;
+
+    opts.terminal.stdout().plain(list).write_line()?;
+
     Ok(())
+}
+
+impl Output for TransportStatus {
+    fn output(&self) -> crate::Result<String> {
+        let mut output = String::new();
+
+        writeln!(
+            output,
+            "{} {}",
+            self.tt,
+            self.tm
+                .to_string()
+                .color(OckamColor::PrimaryResource.color())
+        )?;
+        writeln!(
+            output,
+            "Worker {}",
+            self.worker_addr
+                .to_string()
+                .color(OckamColor::PrimaryResource.color())
+        )?;
+        writeln!(
+            output,
+            "Processor {}",
+            self.processor_address
+                .to_string()
+                .color(OckamColor::PrimaryResource.color())
+        )?;
+
+        write!(
+            output,
+            "{}",
+            self.socket_addr
+                .to_string()
+                .color(OckamColor::PrimaryResource.color())
+        )?;
+
+        Ok(output)
+    }
 }

@@ -1,7 +1,9 @@
-use crate::identity::{IdentityError, IdentityIdentifier};
 use ockam_core::compat::vec::Vec;
 use ockam_core::{Decodable, Encodable, LocalInfo, LocalMessage, Result};
 use serde::{Deserialize, Serialize};
+
+use crate::models::Identifier;
+use crate::IdentityError;
 
 /// Identity SecureChannel LocalInfo unique Identifier
 pub const IDENTITY_SECURE_CHANNEL_IDENTIFIER: &str = "IDENTITY_SECURE_CHANNEL_IDENTIFIER";
@@ -9,7 +11,7 @@ pub const IDENTITY_SECURE_CHANNEL_IDENTIFIER: &str = "IDENTITY_SECURE_CHANNEL_ID
 /// Identity SecureChannel LocalInfo used for LocalMessage
 #[derive(Serialize, Deserialize)]
 pub struct IdentitySecureChannelLocalInfo {
-    their_identity_id: IdentityIdentifier,
+    their_identity_id: Identifier,
 }
 
 impl IdentitySecureChannelLocalInfo {
@@ -54,7 +56,7 @@ impl IdentitySecureChannelLocalInfo {
 
 impl IdentitySecureChannelLocalInfo {
     /// Key exchange name
-    pub fn their_identity_id(&self) -> IdentityIdentifier {
+    pub fn their_identity_id(&self) -> Identifier {
         self.their_identity_id.clone()
     }
 }
@@ -64,7 +66,7 @@ impl IdentitySecureChannelLocalInfo {
     /// replacing any pre-existing entries
     pub fn mark(
         mut local_info: Vec<LocalInfo>,
-        their_identity_id: IdentityIdentifier,
+        their_identity_id: Identifier,
     ) -> Result<Vec<LocalInfo>> {
         // strip out any pre-existing IdentitySecureChannelLocalInfo
         local_info.retain(|x| x.type_identifier() != IDENTITY_SECURE_CHANNEL_IDENTIFIER);

@@ -4,101 +4,76 @@ mod secure;
 
 use ockam_core::errcode::{Kind, Origin};
 use ockam_core::flow_control::FlowControlId;
-use ockam_core::flow_control::FlowControlPolicy::ProducerAllowMultiple;
-use ockam_core::{async_trait, route, Address, CowStr, Route, LOCAL};
-use ockam_identity::IdentityIdentifier;
+use ockam_core::Result;
+use ockam_core::{async_trait, route, Address, Route, LOCAL};
 use ockam_multiaddr::proto::Service;
 use ockam_multiaddr::{Match, MultiAddr, Protocol};
 use ockam_node::Context;
-use std::fmt::{Debug, Formatter};
-use std::time::Duration;
+use ockam_transport_tcp::{TcpConnection, TcpTransport};
 
+use crate::error::ApiError;
+use crate::nodes::NodeManager;
+use crate::{multiaddr_to_route, DefaultAddress};
 pub(crate) use plain_tcp::PlainTcpInstantiator;
 pub(crate) use project::ProjectInstantiator;
 pub(crate) use secure::SecureChannelInstantiator;
-
-pub struct Connection<'a> {
-    pub ctx: &'a Context,
-    pub addr: &'a MultiAddr,
-    pub identity_name: Option<CowStr<'a>>,
-    pub credential_name: Option<CowStr<'a>>,
-    pub authorized_identities: Option<Vec<IdentityIdentifier>>,
-    pub timeout: Option<Duration>,
-    pub add_default_consumers: bool,
-}
-
-impl<'a> Connection<'a> {
-    pub fn new(ctx: &'a Context, addr: &'a MultiAddr) -> Self {
-        Self {
-            ctx,
-            addr,
-            identity_name: None,
-            credential_name: None,
-            authorized_identities: None,
-            timeout: None,
-            add_default_consumers: false,
-        }
-    }
-
-    #[allow(unused)]
-    pub fn with_credential_name<T: Into<Option<CowStr<'a>>>>(mut self, credential_name: T) -> Self {
-        self.credential_name = credential_name.into();
-        self
-    }
-
-    pub fn with_authorized_identity<T: Into<Option<IdentityIdentifier>>>(
-        mut self,
-        authorized_identity: T,
-    ) -> Self {
-        self.authorized_identities = authorized_identity.into().map(|x| vec![x]);
-        self
-    }
-
-    pub fn with_timeout(mut self, timeout: Duration) -> Self {
-        self.timeout = Some(timeout);
-        self
-    }
-
-    pub fn add_default_consumers(mut self) -> Self {
-        self.add_default_consumers = true;
-        self
-    }
-}
+use std::fmt::{Debug, Formatter};
+use std::sync::Arc;
 
 #[derive(Clone)]
-pub struct ConnectionInstance {
+pub struct Connection {
     /// Transport route consists of only transport addresses,
     /// transport addresses are services which only carries over the payload without
     /// interpreting the content, and must be used to reach the other side of the connection.
-    pub transport_route: Route,
+    transport_route: Route,
     /// Resulting [`MultiAddr`] from the normalization, devoid of normalized protocols.
     /// A fully normalized [`MultiAddr`] contains only Service entries.
-    pub normalized_addr: MultiAddr,
+    pub(crate) normalized_addr: MultiAddr,
     /// The original provided [`MultiAddr`]
-    pub original_addr: MultiAddr,
+    original_addr: MultiAddr,
     /// A list of secure channel encryptors created for the connection.
     /// Needed to cleanup the connection resources when it must be closed.
-    pub secure_channel_encryptors: Vec<Address>,
+    pub(crate) secure_channel_encryptors: Vec<Address>,
     /// A TCP worker address if used when instantiating the connection
-    pub tcp_worker: Option<Address>,
+    pub(crate) tcp_connection: Option<TcpConnection>,
     /// If a flow control was created
-    pub flow_control_id: Option<FlowControlId>,
+    flow_control_id: Option<FlowControlId>,
 }
 
-impl ConnectionInstance {
+impl Connection {
     /// Shorthand to add the address as consumer to the flow control
-    pub fn add_consumer(&self, context: &Context, address: &Address) {
+    pub fn add_consumer(&self, context: Arc<Context>, address: &Address) {
         if let Some(flow_control_id) = &self.flow_control_id {
-            context.flow_controls().add_consumer(
-                address.clone(),
-                flow_control_id,
-                ProducerAllowMultiple,
-            );
+            context
+                .flow_controls()
+                .add_consumer(address.clone(), flow_control_id);
         }
+    }
+
+    pub fn add_default_consumers(&self, ctx: Arc<Context>) {
+        self.add_consumer(ctx.clone(), &DefaultAddress::SECURE_CHANNEL_LISTENER.into());
+        self.add_consumer(ctx.clone(), &DefaultAddress::UPPERCASE_SERVICE.into());
+        self.add_consumer(ctx, &DefaultAddress::ECHO_SERVICE.into());
+    }
+
+    pub fn transport_route(&self) -> Route {
+        self.transport_route.clone()
+    }
+
+    pub async fn route(&self, tcp_transport: &TcpTransport) -> Result<Route> {
+        multiaddr_to_route(&self.normalized_addr, tcp_transport)
+            .await
+            .map(|r| r.route)
+            .ok_or_else(|| {
+                ApiError::core(format!(
+                    "Couldn't convert MultiAddr to route: normalized_addr={}",
+                    self.normalized_addr
+                ))
+            })
     }
 }
 
-impl Debug for ConnectionInstance {
+impl Debug for Connection {
     fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
         write!(f, "{{")?;
         write!(f, " transport_route: {},", self.transport_route)?;
@@ -116,16 +91,16 @@ impl Debug for ConnectionInstance {
 
 /// Used to instantiate a connection from a [`MultiAddr`]
 #[derive(Clone)]
-pub struct ConnectionInstanceBuilder {
+pub(crate) struct ConnectionBuilder {
     original_multiaddr: MultiAddr,
-    pub current_multiaddr: MultiAddr,
-    pub transport_route: Route,
-    pub flow_control_id: Option<FlowControlId>,
-    pub secure_channel_encryptors: Vec<Address>,
-    pub tcp_worker: Option<Address>,
+    pub(crate) current_multiaddr: MultiAddr,
+    pub(crate) transport_route: Route,
+    pub(crate) flow_control_id: Option<FlowControlId>,
+    pub(crate) secure_channel_encryptors: Vec<Address>,
+    pub(crate) tcp_connection: Option<TcpConnection>,
 }
 
-impl Debug for ConnectionInstanceBuilder {
+impl Debug for ConnectionBuilder {
     fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
         write!(f, "{{")?;
         write!(f, " original_multiaddr: {},", self.original_multiaddr)?;
@@ -141,17 +116,17 @@ impl Debug for ConnectionInstanceBuilder {
     }
 }
 
-/// Represent changes to write to the [`ConnectionInstanceBuilder`]
+/// Represent changes to write to the [`ConnectionBuilder`]
 pub struct Changes {
-    /// If set, will overwrite the existing one on the [`ConnectionInstanceBuilder`] state
+    /// If set, will overwrite the existing one on the [`ConnectionBuilder`] state
     pub flow_control_id: Option<FlowControlId>,
-    /// Mandatory, will update the main [`MultiAddr`] in the [`ConnectionInstanceBuilder`]
+    /// Mandatory, will update the main [`MultiAddr`] in the [`ConnectionBuilder`]
     pub current_multiaddr: MultiAddr,
     /// Optional, to keep track of resources used add every time
     /// a new secure channel encryptor is created
     pub secure_channel_encryptors: Vec<Address>,
     /// Optional, to keep track of tcp worker when created for the connection
-    pub tcp_worker: Option<Address>,
+    pub tcp_connection: Option<TcpConnection>,
 }
 
 /// Takes in a [`MultiAddr`] and instantiate it, can be implemented for any protocol.
@@ -164,36 +139,38 @@ pub trait Instantiator: Send + Sync + 'static {
     /// Instantiate the match found within the [`MultiAddr`] using [`Instantiator::matches()`]
     /// * `builder` - Current state of the builder, read-only
     /// * `match_start` - The start of the match within the [`MultiAddr`],
-    ///                   see [`ConnectionInstanceBuilder::extract()`]
-    ///                   and [`ConnectionInstanceBuilder::combine()`]
+    ///                   see [`ConnectionBuilder::extract()`]
+    ///                   and [`ConnectionBuilder::combine()`]
     ///
     /// The returned [`Changes`] will be used to update the builder state.
     async fn instantiate(
         &self,
-        builder: &ConnectionInstanceBuilder,
-        match_start: usize,
+        ctx: Arc<Context>,
+        node_manager: &NodeManager,
+        transport_route: Route,
+        extracted: (MultiAddr, MultiAddr, MultiAddr),
     ) -> Result<Changes, ockam_core::Error>;
 }
 
-impl ConnectionInstanceBuilder {
+impl ConnectionBuilder {
     pub fn new(multi_addr: MultiAddr) -> Self {
-        ConnectionInstanceBuilder {
+        ConnectionBuilder {
             transport_route: route![],
             original_multiaddr: multi_addr.clone(),
             current_multiaddr: multi_addr,
             secure_channel_encryptors: vec![],
             flow_control_id: None,
-            tcp_worker: None,
+            tcp_connection: None,
         }
     }
 
-    pub fn build(self) -> ConnectionInstance {
-        ConnectionInstance {
+    pub fn build(self) -> Connection {
+        Connection {
             transport_route: self.transport_route,
             normalized_addr: self.current_multiaddr,
             original_addr: self.original_multiaddr,
             secure_channel_encryptors: self.secure_channel_encryptors,
-            tcp_worker: self.tcp_worker,
+            tcp_connection: self.tcp_connection,
             flow_control_id: self.flow_control_id,
         }
     }
@@ -203,6 +180,8 @@ impl ConnectionInstanceBuilder {
     /// user make sure higher protocol abstraction are called before lower level ones
     pub async fn instantiate(
         mut self,
+        ctx: Arc<Context>,
+        node_manager: &NodeManager,
         instantiator: impl Instantiator,
     ) -> Result<Self, ockam_core::Error> {
         //executing a regex-like search, shifting the starting point one by one
@@ -214,33 +193,45 @@ impl ConnectionInstanceBuilder {
         if self.current_multiaddr.len() > length {
             while start < self.current_multiaddr.len() - length {
                 if self.current_multiaddr.matches(start, &codes) {
-                    let mut changes = instantiator.instantiate(&self, start).await?;
+                    // the transport route should include only the pieces before the match
+                    self.transport_route = self.recalculate_transport_route(
+                        self.current_multiaddr.split(start).0,
+                        false,
+                    )?;
+                    let mut changes = instantiator
+                        .instantiate(
+                            ctx.clone(),
+                            node_manager,
+                            self.transport_route.clone(),
+                            self.extract(start, instantiator.matches().len()),
+                        )
+                        .await?;
 
                     self.current_multiaddr = changes.current_multiaddr;
                     self.secure_channel_encryptors
                         .append(&mut changes.secure_channel_encryptors);
 
-                    if changes.tcp_worker.is_some() {
-                        if self.tcp_worker.is_some() {
+                    if changes.tcp_connection.is_some() {
+                        if self.tcp_connection.is_some() {
                             return Err(ockam_core::Error::new(
                                 Origin::Transport,
                                 Kind::Unsupported,
                                 "multiple tcp connections created in a `MultiAddr`",
                             ));
                         }
-                        self.tcp_worker = changes.tcp_worker;
+                        self.tcp_connection = changes.tcp_connection;
                     }
 
                     if changes.flow_control_id.is_some() {
                         self.flow_control_id = changes.flow_control_id;
                     }
-                    self.transport_route = self.recalculate_transport_route()?;
                 }
                 start += 1;
             }
-        } else {
-            self.transport_route = self.recalculate_transport_route()?;
         }
+
+        self.transport_route =
+            self.recalculate_transport_route(self.current_multiaddr.clone(), true)?;
 
         Ok(Self {
             original_multiaddr: self.original_multiaddr,
@@ -248,15 +239,20 @@ impl ConnectionInstanceBuilder {
             secure_channel_encryptors: self.secure_channel_encryptors,
             current_multiaddr: self.current_multiaddr,
             flow_control_id: self.flow_control_id,
-            tcp_worker: self.tcp_worker,
+            tcp_connection: self.tcp_connection,
         })
     }
 
     /// Calculate a 'transport route' from the [`MultiAddr`]
-    fn recalculate_transport_route(&self) -> Result<Route, ockam_core::Error> {
-        // assuming every plain service of the MultiAddr is transport except last
+    fn recalculate_transport_route(
+        &self,
+        current_before: MultiAddr,
+        last_pass: bool,
+    ) -> Result<Route, ockam_core::Error> {
+        // only when performing the last pass we assume every plain service of the MultiAddr
+        // is transport except last
         let mut route = Route::new();
-        let mut peekable = self.current_multiaddr.iter().peekable();
+        let mut peekable = current_before.iter().peekable();
         while let Some(protocol) = peekable.next() {
             if protocol.code() == Service::CODE {
                 if let Some(service) = protocol.cast::<Service>() {
@@ -266,7 +262,7 @@ impl ConnectionInstanceBuilder {
                     // but when a suffix route is appended (like in the inlet) is used
                     // the last piece could actually be a transport, in this case we allow
                     // last piece only if it's a just created secure channel
-                    if is_last && !self.secure_channel_encryptors.contains(&address) {
+                    if last_pass && is_last && !self.secure_channel_encryptors.contains(&address) {
                         break;
                     }
                     route = route.append(address);
@@ -279,14 +275,9 @@ impl ConnectionInstanceBuilder {
 
     /// Extracts from a [`MultiAddr`] a piece, starting from `start` of length `length`.
     /// Returns the three pieces, (before, center, after).
-    pub fn extract(
-        multiaddr: &MultiAddr,
-        start: usize,
-        length: usize,
-    ) -> (MultiAddr, MultiAddr, MultiAddr) {
-        let (before, found_addr) = multiaddr.split(start);
+    fn extract(&self, start: usize, length: usize) -> (MultiAddr, MultiAddr, MultiAddr) {
+        let (before, found_addr) = self.current_multiaddr.split(start);
         let (part_to_replace, after) = found_addr.split(length);
-
         (before, part_to_replace, after)
     }
 

@@ -1,23 +1,25 @@
+use crate::identity::models::Identifier;
+use crate::identity::storage::Storage;
+use crate::identity::{
+    secure_channels, Credentials, CredentialsServer, Identities, IdentitiesCreation,
+    IdentitiesKeys, IdentitiesRepository, SecureChannel, SecureChannelListener,
+    SecureChannelRegistry, SecureChannels, SecureChannelsBuilder,
+};
+use crate::identity::{Identity, SecureChannelListenerOptions, SecureChannelOptions};
 use ockam_core::compat::string::String;
 use ockam_core::compat::sync::Arc;
 use ockam_core::flow_control::FlowControls;
 use ockam_core::{
-    Address, IncomingAccessControl, Message, OutgoingAccessControl, Processor, Result, Route,
-    Routed, Worker,
+    Address, AsyncTryClone, IncomingAccessControl, Message, OutgoingAccessControl, Processor,
+    Result, Route, Routed, Worker,
 };
-use ockam_identity::{
-    secure_channels, Credentials, CredentialsServer, Identities, IdentitiesCreation,
-    IdentitiesKeys, IdentitiesRepository, IdentityIdentifier, SecureChannel, SecureChannelListener,
-    SecureChannelRegistry, SecureChannels, SecureChannelsBuilder, Storage,
-};
-use ockam_identity::{
-    IdentitiesVault, Identity, SecureChannelListenerOptions, SecureChannelOptions,
-};
+use ockam_identity::{PurposeKeys, Vault, VaultStorage};
 use ockam_node::{Context, HasContext, MessageReceiveOptions, MessageSendReceiveOptions};
-use ockam_vault::VaultStorage;
+use ockam_vault::SigningSecretKeyHandle;
 
-use crate::remote::{RemoteForwarder, RemoteForwarderInfo, RemoteForwarderOptions};
+use crate::remote::{RemoteRelay, RemoteRelayInfo, RemoteRelayOptions};
 use crate::stream::Stream;
+use crate::OckamError;
 
 /// This struct supports all the ockam services for managing identities
 /// and creating secure channels
@@ -37,7 +39,7 @@ pub struct Node {
 /// use ockam_vault::storage::PersistentStorage;
 ///
 /// async fn make_node(ctx: Context) -> Result<Node> {
-///   let node = Node::builder().with_vault_storage(PersistentStorage::create(Path::new("vault")).await?).build(ctx).await?;
+///   let node = Node::builder().with_vault_storage(PersistentStorage::create(Path::new("vault")).await?).build(&ctx).await?;
 ///   Ok(node)
 /// }
 ///
@@ -52,7 +54,7 @@ pub struct Node {
 ///
 /// async fn make_node(ctx: Context) -> Result<Node> {
 ///    let lmdb_storage = Arc::new(LmdbStorage::new("identities").await?);
-///    let node = Node::builder().with_identities_storage(lmdb_storage).build(ctx).await?;
+///    let node = Node::builder().with_identities_storage(lmdb_storage).build(&ctx).await?;
 ///    Ok(node)
 /// }
 /// ```
@@ -79,55 +81,73 @@ impl Node {
         Stream::new(self.get_context()).await
     }
 
-    /// Create a new forwarder
-    pub async fn create_forwarder(
+    /// Create a new relay
+    pub async fn create_relay(
         &self,
         orchestrator_route: impl Into<Route>,
-        options: RemoteForwarderOptions,
-    ) -> Result<RemoteForwarderInfo> {
-        RemoteForwarder::create(self.get_context(), orchestrator_route, options).await
+        options: RemoteRelayOptions,
+    ) -> Result<RemoteRelayInfo> {
+        RemoteRelay::create(self.get_context(), orchestrator_route, options).await
     }
 
-    /// Create a new static forwarder
-    pub async fn create_static_forwarder(
+    /// Create a new static relay
+    pub async fn create_static_relay(
         &self,
         orchestrator_route: impl Into<Route>,
         alias: impl Into<String>,
-        options: RemoteForwarderOptions,
-    ) -> Result<RemoteForwarderInfo> {
-        RemoteForwarder::create_static(self.get_context(), orchestrator_route, alias, options).await
+        options: RemoteRelayOptions,
+    ) -> Result<RemoteRelayInfo> {
+        RemoteRelay::create_static(self.get_context(), orchestrator_route, alias, options).await
     }
 
     /// Create an Identity
-    pub async fn create_identity(&self) -> Result<IdentityIdentifier> {
+    pub async fn create_identity(&self) -> Result<Identifier> {
         Ok(self
             .identities_creation()
             .create_identity()
             .await?
-            .identifier())
+            .identifier()
+            .clone())
+    }
+
+    /// Create the [`SecureChannel`] [`PurposeKey`]
+    pub async fn create_secure_channel_key(&self, identifier: &Identifier) -> Result<()> {
+        let _ = self
+            .identities()
+            .purpose_keys()
+            .purpose_keys_creation()
+            .create_secure_channel_purpose_key(identifier)
+            .await?;
+
+        Ok(())
     }
 
     /// Import an Identity given its private key and change history
     /// Note: the data is not persisted!
     pub async fn import_private_identity(
         &self,
-        identity_history: &str,
-        secret: &str,
+        identity_change_history: &[u8],
+        key: &SigningSecretKeyHandle,
     ) -> Result<Identity> {
         self.identities_creation()
-            .import_private_identity(identity_history, secret)
+            .import_private_identity(identity_change_history, key)
             .await
     }
 
     /// Import an Identity given that was exported as a hex-encoded string
     pub async fn import_identity_hex(&self, data: &str) -> Result<Identity> {
-        self.identities_creation().decode_identity_hex(data).await
+        self.identities_creation()
+            .import(
+                None,
+                &hex::decode(data).map_err(|_| OckamError::InvalidHex)?,
+            )
+            .await
     }
 
     /// Spawns a SecureChannel listener at given `Address` with given [`SecureChannelListenerOptions`]
     pub async fn create_secure_channel_listener(
         &self,
-        identifier: &IdentityIdentifier,
+        identifier: &Identifier,
         address: impl Into<Address>,
         options: impl Into<SecureChannelListenerOptions>,
     ) -> Result<SecureChannelListener> {
@@ -139,7 +159,7 @@ impl Node {
     /// Initiate a SecureChannel using `Route` to the SecureChannel listener and [`SecureChannelOptions`]
     pub async fn create_secure_channel(
         &self,
-        identifier: &IdentityIdentifier,
+        identifier: &Identifier,
         route: impl Into<Route>,
         options: impl Into<SecureChannelOptions>,
     ) -> Result<SecureChannel> {
@@ -148,25 +168,40 @@ impl Node {
             .await
     }
 
-    /// Start a new worker instance at the given address
-    pub async fn start_worker<NM, NW>(
+    /// Start a new worker instance at the given address. Default Access Control is AllowAll
+    pub async fn start_worker<W>(&self, address: impl Into<Address>, worker: W) -> Result<()>
+    where
+        W: Worker<Context = Context>,
+    {
+        self.context.start_worker(address, worker).await
+    }
+
+    /// Start a new worker instance at the given address with given Access Controls
+    pub async fn start_worker_with_access_control<W>(
         &self,
         address: impl Into<Address>,
-        worker: NW,
+        worker: W,
         incoming: impl IncomingAccessControl,
         outgoing: impl OutgoingAccessControl,
     ) -> Result<()>
     where
-        NM: Message + Send + 'static,
-        NW: Worker<Context = Context, Message = NM>,
+        W: Worker<Context = Context>,
     {
         self.context
-            .start_worker(address, worker, incoming, outgoing)
+            .start_worker_with_access_control(address, worker, incoming, outgoing)
             .await
     }
 
-    /// Start a new processor instance at the given address
-    pub async fn start_processor<P>(
+    /// Start a new processor instance at the given address. Default Access Control is DenyAll
+    pub async fn start_processor<P>(&self, address: impl Into<Address>, processor: P) -> Result<()>
+    where
+        P: Processor<Context = Context>,
+    {
+        self.context.start_processor(address, processor).await
+    }
+
+    /// Start a new processor instance at the given address with given Access Controls
+    pub async fn start_processor_with_access_control<P>(
         &self,
         address: impl Into<Address>,
         processor: P,
@@ -177,7 +212,7 @@ impl Node {
         P: Processor<Context = Context>,
     {
         self.context
-            .start_processor(address, processor, incoming, outgoing)
+            .start_processor_with_access_control(address, processor, incoming, outgoing)
             .await
     }
 
@@ -241,42 +276,42 @@ impl Node {
 
     /// Return services to manage identities
     pub fn identities(&self) -> Arc<Identities> {
-        self.secure_channels().identities()
+        self.secure_channels.identities()
     }
 
     /// Return services to create and import identities
     pub fn identities_creation(&self) -> Arc<IdentitiesCreation> {
-        self.identities().identities_creation()
+        self.secure_channels.identities().identities_creation()
     }
 
     /// Return services to manage identities keys
     pub fn identities_keys(&self) -> Arc<IdentitiesKeys> {
-        self.identities().identities_keys()
+        self.secure_channels.identities().identities_keys()
     }
 
     /// Return services to manage credentials
-    pub fn credentials(&self) -> Arc<dyn Credentials> {
-        self.identities().credentials()
+    pub fn credentials(&self) -> Arc<Credentials> {
+        self.secure_channels.identities().credentials()
+    }
+
+    /// Return the [`Vault`]
+    pub fn vault(&self) -> Vault {
+        self.secure_channels.vault()
+    }
+
+    /// Return the vault used by secure channels
+    pub fn purpose_keys(&self) -> Arc<PurposeKeys> {
+        self.secure_channels.identities().purpose_keys()
     }
 
     /// Return services to serve credentials
     pub fn credentials_server(&self) -> Arc<dyn CredentialsServer> {
-        self.identities().credentials_server()
+        self.secure_channels.identities().credentials_server()
     }
 
     /// Return the repository used to store identities data
-    pub fn repository(&self) -> Arc<dyn IdentitiesRepository> {
-        self.identities().repository()
-    }
-
-    /// Return the vault used by secure channels
-    pub fn secure_channels_vault(&self) -> Arc<dyn IdentitiesVault> {
-        self.secure_channels().vault()
-    }
-
-    /// Return the vault used by identities
-    pub fn identities_vault(&self) -> Arc<dyn IdentitiesVault> {
-        self.identities().vault()
+    pub fn identities_repository(&self) -> Arc<dyn IdentitiesRepository> {
+        self.secure_channels.identities().repository()
     }
 
     /// Return a new builder for top-level services
@@ -301,52 +336,46 @@ pub struct NodeBuilder {
 }
 
 impl NodeBuilder {
-    fn new() -> NodeBuilder {
-        NodeBuilder {
+    fn new() -> Self {
+        Self {
             builder: SecureChannels::builder(),
         }
     }
 
-    /// Set a specific vault storage for identities and secure channels
-    pub fn with_vault_storage(&mut self, storage: VaultStorage) -> NodeBuilder {
-        self.builder = self.builder.with_vault_storage(storage);
-        self.clone()
+    /// Set [`Vault`]
+    pub fn with_vault(mut self, vault: Vault) -> Self {
+        self.builder = self.builder.with_vault(vault);
+        self
     }
 
-    /// Set a specific identities vault
-    pub fn with_identities_vault(&mut self, vault: Arc<dyn IdentitiesVault>) -> NodeBuilder {
-        self.builder = self.builder.with_identities_vault(vault);
-        self.clone()
+    /// With Software Vault with given Storage
+    pub fn with_vault_storage(mut self, storage: VaultStorage) -> Self {
+        self.builder = self.builder.with_vault_storage(storage);
+        self
     }
 
     /// Set a specific storage for identities
-    pub fn with_identities_storage(&mut self, storage: Arc<dyn Storage>) -> NodeBuilder {
+    pub fn with_identities_storage(mut self, storage: Arc<dyn Storage>) -> Self {
         self.builder = self.builder.with_identities_storage(storage);
-        self.clone()
+        self
     }
 
     /// Set a specific identities repository
-    pub fn with_identities_repository(
-        &mut self,
-        repository: Arc<dyn IdentitiesRepository>,
-    ) -> NodeBuilder {
+    pub fn with_identities_repository(mut self, repository: Arc<dyn IdentitiesRepository>) -> Self {
         self.builder = self.builder.with_identities_repository(repository);
-        self.clone()
+        self
     }
 
     /// Set a specific secure channels registry
-    pub fn with_secure_channels_registry(
-        &mut self,
-        registry: SecureChannelRegistry,
-    ) -> NodeBuilder {
+    pub fn with_secure_channels_registry(mut self, registry: SecureChannelRegistry) -> Self {
         self.builder = self.builder.with_secure_channels_registry(registry);
-        self.clone()
+        self
     }
 
     /// Build top level services
-    pub async fn build(&self, ctx: Context) -> Result<Node> {
+    pub async fn build(self, ctx: &Context) -> Result<Node> {
         Ok(Node {
-            context: ctx,
+            context: ctx.async_try_clone().await?,
             secure_channels: self.builder.build(),
         })
     }

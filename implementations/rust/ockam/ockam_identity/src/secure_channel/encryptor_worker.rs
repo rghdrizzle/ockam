@@ -1,12 +1,13 @@
-use crate::identity::IdentityError;
-use crate::secure_channel::addresses::Addresses;
-use crate::secure_channel::api::{EncryptionRequest, EncryptionResponse};
-use crate::secure_channel::encryptor::Encryptor;
 use ockam_core::compat::boxed::Box;
 use ockam_core::{async_trait, Decodable, Encodable, Route};
 use ockam_core::{Any, Result, Routed, TransportMessage, Worker};
 use ockam_node::Context;
 use tracing::debug;
+
+use crate::secure_channel::addresses::Addresses;
+use crate::secure_channel::api::{EncryptionRequest, EncryptionResponse};
+use crate::secure_channel::encryptor::Encryptor;
+use crate::IdentityError;
 
 pub(crate) struct EncryptorWorker {
     //for debug purposes only
@@ -119,5 +120,12 @@ impl Worker for EncryptorWorker {
         }
 
         Ok(())
+    }
+
+    async fn shutdown(&mut self, context: &mut Self::Context) -> Result<()> {
+        let _ = context
+            .stop_worker(self.addresses.decryptor_internal.clone())
+            .await;
+        self.encryptor.shutdown().await
     }
 }

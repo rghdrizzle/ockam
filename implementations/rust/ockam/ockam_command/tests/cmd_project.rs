@@ -9,14 +9,15 @@ fn valid_arguments() -> Result<(), Box<dyn std::error::Error>> {
     cmd.args(prefix_args)
         .arg("create")
         .arg("space-name")
-        .arg("project-name")
-        .arg("--")
-        .arg("service-a")
-        .arg("service-b");
+        .arg("project-name");
     cmd.assert().success();
 
     let mut cmd = Command::cargo_bin("ockam")?;
     cmd.args(prefix_args).arg("list");
+    cmd.assert().success();
+
+    let mut cmd = Command::cargo_bin("ockam")?;
+    cmd.args(prefix_args).arg("version");
     cmd.assert().success();
 
     let mut cmd = Command::cargo_bin("ockam")?;

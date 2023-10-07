@@ -1,3 +1,4 @@
+use crate::util::local_cmd;
 use crate::CommandGlobalOpts;
 use clap::Args;
 use ockam_api::cli_state::{StateDirTrait, StateItemTrait};
@@ -10,16 +11,13 @@ pub struct GetCommand {
 
 impl GetCommand {
     pub fn run(self, options: CommandGlobalOpts) {
-        if let Err(e) = run_impl(options, self) {
-            eprintln!("{e}");
-            std::process::exit(e.code());
-        }
+        local_cmd(run_impl(options, self));
     }
 }
 
-fn run_impl(opts: CommandGlobalOpts, cmd: GetCommand) -> crate::Result<()> {
+fn run_impl(opts: CommandGlobalOpts, cmd: GetCommand) -> miette::Result<()> {
     let node_state = opts.state.nodes.get(cmd.alias)?;
-    let addr = &node_state.config().setup().default_tcp_listener()?.addr;
+    let addr = &node_state.config().setup().api_transport()?.addr;
     println!("Address: {addr}");
     Ok(())
 }

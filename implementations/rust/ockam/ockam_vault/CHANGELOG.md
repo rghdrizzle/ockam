@@ -4,6 +4,64 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## 0.86.0 - 2023-10-07
+
+### Changed
+
+- Improve `Vault` type-safety
+- Updated dependencies
+
+## 0.85.0 - 2023-10-05
+
+### Changed
+
+- Improve `Vault` type-safety
+- Updated dependencies
+
+## 0.84.0 - 2023-09-28
+
+### Changed
+
+- Updated dependencies
+
+## 0.83.0 - 2023-09-23
+
+### Changed
+
+- Switch to new `Identity` design
+- Updated dependencies
+
+## 0.82.0 - 2023-09-22
+
+### Changed
+
+- Switch to new `Identity` design
+- Updated dependencies
+
+## 0.81.0 - 2023-09-13
+
+### Changed
+
+- Updated dependencies
+
+## 0.80.0 - 2023-09-06
+
+### Changed
+
+- Updated dependencies
+
+## 0.79.0 - 2023-06-26
+
+### Changed
+
+- Updated dependencies
+
+## 0.78.0 - 2023-06-09
+
+### Changed
+
+- Updated dependencies
+
 ## 0.77.0 - 2023-05-26
 
 ### Changed

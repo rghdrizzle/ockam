@@ -1,3 +1,4 @@
+use core::str::from_utf8;
 use ockam_core::async_trait;
 use ockam_core::compat::boxed::Box;
 use ockam_core::compat::fmt;
@@ -15,7 +16,7 @@ use crate::{eval, Env, Expr};
 use ockam_core::compat::format;
 use ockam_core::compat::string::ToString;
 use ockam_core::compat::sync::Arc;
-use ockam_identity::{IdentitiesRepository, IdentitySecureChannelLocalInfo};
+use ockam_identity::{Identifier, IdentitiesRepository, IdentitySecureChannelLocalInfo};
 
 /// This AccessControl uses a storage for authenticated attributes in order
 /// to verify if a policy expression is valid
@@ -66,26 +67,25 @@ where {
     }
 }
 
-#[async_trait]
-impl IncomingAccessControl for AbacAccessControl {
-    /// Return true if the sender of the message is validated by the expression stored in AbacAccessControl
-    async fn is_authorized(&self, msg: &RelayMessage) -> Result<bool> {
-        // Get identity identifier from message metadata:
-        let id = if let Ok(info) = IdentitySecureChannelLocalInfo::find_info(msg.local_message()) {
-            info.their_identity_id().clone()
-        } else {
-            log::debug! {
-                policy = %self.expression,
-                "identity identifier not found; access denied"
-            }
-            return Ok(false);
-        };
-
+impl AbacAccessControl {
+    /// Returns true if the identity is authorized
+    pub async fn is_identity_authorized(&self, id: Identifier) -> Result<bool> {
         let mut environment = self.environment.clone();
 
         // Get identity attributes and populate the environment:
         if let Some(attrs) = self.repository.get_attributes(&id).await? {
             for (key, value) in attrs.attrs() {
+                let key = match from_utf8(key) {
+                    Ok(key) => key,
+                    Err(_) => {
+                        log::warn! {
+                            policy = %self.expression,
+                            id     = %id,
+                            "attribute key is not utf-8"
+                        }
+                        continue;
+                    }
+                };
                 if key.find(|c: char| c.is_whitespace()).is_some() {
                     log::warn! {
                         policy = %self.expression,
@@ -153,5 +153,24 @@ impl IncomingAccessControl for AbacAccessControl {
                 Ok(false)
             }
         }
+    }
+}
+
+#[async_trait]
+impl IncomingAccessControl for AbacAccessControl {
+    /// Returns true if the sender of the message is validated by the expression stored in AbacAccessControl
+    async fn is_authorized(&self, msg: &RelayMessage) -> Result<bool> {
+        // Get identity identifier from message metadata:
+        let id = if let Ok(info) = IdentitySecureChannelLocalInfo::find_info(msg.local_message()) {
+            info.their_identity_id()
+        } else {
+            log::debug! {
+                policy = %self.expression,
+                "identity identifier not found; access denied"
+            }
+            return Ok(false);
+        };
+
+        self.is_identity_authorized(id).await
     }
 }

@@ -1,11 +1,10 @@
 use crate::cli_state::{ProjectState, StateItemTrait};
 use crate::cloud::project::{OktaAuth0, Project};
 use crate::error::ApiError;
-use anyhow::Context as _;
 use bytes::Bytes;
-use ockam::identity::{identities, IdentityIdentifier};
+use miette::WrapErr;
+use ockam::identity::{identities, Identifier};
 use ockam_core::compat::collections::VecDeque;
-use ockam_core::Result;
 use ockam_multiaddr::MultiAddr;
 use serde::{Deserialize, Serialize};
 use std::{
@@ -128,7 +127,7 @@ pub enum LookupValue {
 }
 
 /// An internet address abstraction (v6/v4/dns)
-#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq, Hash)]
 pub enum InternetAddress {
     /// DNSaddr and port
     Dns(String, u16),
@@ -220,7 +219,7 @@ pub struct ProjectLookup {
     /// Name of this project within
     pub name: String,
     /// Identifier of the IDENTITY of the project (for secure-channel)
-    pub identity_id: Option<IdentityIdentifier>,
+    pub identity_id: Option<Identifier>,
     /// Project authority information.
     pub authority: Option<ProjectAuthority>,
     /// OktaAuth0 information.
@@ -228,23 +227,15 @@ pub struct ProjectLookup {
 }
 
 impl ProjectLookup {
-    pub async fn from_project(project: &Project) -> anyhow::Result<Self> {
-        let node_route: MultiAddr = project
-            .access_route
-            .as_str()
-            .try_into()
-            .context("Invalid project node route")?;
+    pub async fn from_project(project: &Project) -> ockam_core::Result<Self, ApiError> {
+        let node_route: MultiAddr = project.access_route.as_str().try_into()?;
         let pid = project
             .identity
             .as_ref()
-            .context("Project should have identity set")?;
-        let authority = ProjectAuthority::from_raw(
-            &project.authority_access_route,
-            &project.authority_identity,
-        )
-        .await?;
+            .ok_or_else(|| ApiError::message("Project should have identity set"))?;
+        let authority = project.authority().await?;
         let okta = project.okta_config.as_ref().map(|o| OktaAuth0 {
-            tenant_base_url: o.tenant_base_url.to_string(),
+            tenant_base_url: o.tenant_base_url.clone(),
             client_id: o.client_id.to_string(),
             certificate: o.certificate.to_string(),
         });
@@ -259,7 +250,7 @@ impl ProjectLookup {
         })
     }
 
-    pub async fn from_state(projects: Vec<ProjectState>) -> anyhow::Result<BTreeMap<String, Self>> {
+    pub async fn from_state(projects: Vec<ProjectState>) -> miette::Result<BTreeMap<String, Self>> {
         let mut lookups = BTreeMap::new();
         for p in projects {
             let l = ProjectLookup::from_project(p.config())
@@ -273,13 +264,13 @@ impl ProjectLookup {
 
 #[derive(Clone, Debug, Serialize, Deserialize, Eq, PartialEq)]
 pub struct ProjectAuthority {
-    id: IdentityIdentifier,
+    id: Identifier,
     address: MultiAddr,
     identity: Bytes,
 }
 
 impl ProjectAuthority {
-    pub fn new(id: IdentityIdentifier, addr: MultiAddr, identity: Vec<u8>) -> Self {
+    pub fn new(id: Identifier, addr: MultiAddr, identity: Vec<u8>) -> Self {
         Self {
             id,
             address: addr,
@@ -287,23 +278,24 @@ impl ProjectAuthority {
         }
     }
 
+    pub async fn from_project(project: &Project) -> ockam_core::Result<Option<Self>, ApiError> {
+        Self::from_raw(&project.authority_access_route, &project.authority_identity).await
+    }
+
     pub async fn from_raw<S: ToString>(
         route: &Option<S>,
         identity: &Option<S>,
-    ) -> Result<Option<Self>> {
+    ) -> ockam_core::Result<Option<Self>, ApiError> {
         if let Some(r) = route {
             let rte = MultiAddr::try_from(r.to_string().as_str())?;
             let a = identity
                 .as_ref()
-                .ok_or_else(|| ApiError::generic("Identity is not set"))?
+                .ok_or_else(|| ApiError::message("Identity is not set"))?
                 .to_string();
             let a = hex::decode(a.as_str())
-                .map_err(|_| ApiError::generic("Invalid project authority"))?;
-            let p = identities()
-                .identities_creation()
-                .decode_identity(&a)
-                .await?;
-            Ok(Some(ProjectAuthority::new(p.identifier(), rte, a)))
+                .map_err(|_| ApiError::message("Invalid project authority"))?;
+            let p = identities().identities_creation().import(None, &a).await?;
+            Ok(Some(ProjectAuthority::new(p.identifier().clone(), rte, a)))
         } else {
             Ok(None)
         }
@@ -313,7 +305,7 @@ impl ProjectAuthority {
         &self.identity
     }
 
-    pub fn identity_id(&self) -> &IdentityIdentifier {
+    pub fn identity_id(&self) -> &Identifier {
         &self.id
     }
 

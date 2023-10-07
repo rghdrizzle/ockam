@@ -4,6 +4,99 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## 0.85.0 - 2023-10-07
+
+### Changed
+
+- Improve `Vault` type-safety
+- Updated dependencies
+
+### Fixed
+
+- Fix some credential and timeout issues
+
+## 0.84.0 - 2023-10-05
+
+### Changed
+
+- Improve `Vault` type-safety
+- Updated dependencies
+
+### Fixed
+
+- Fix some credential and timeout issues
+
+## 0.83.0 - 2023-09-28
+
+### Changed
+
+- Updated dependencies
+
+## 0.82.0 - 2023-09-23
+
+### Changed
+
+- Switch to new `Identity` design
+- Updated dependencies
+
+## 0.81.0 - 2023-09-22
+
+### Changed
+
+- Switch to new `Identity` design
+- Updated dependencies
+
+## 0.80.0 - 2023-09-13
+
+### Changed
+
+- Updated dependencies
+
+## 0.79.0 - 2023-09-06
+
+### Added
+
+- Add `v2` module to `ockam_identity`
+- Add secure channel implementation to new identity design
+
+### Changed
+
+- Start using `PurposeKeys` from the storage
+- Updated dependencies
+
+### Fixed
+
+- Fix flaky stop secure channel test
+- Fix new identity design tests
+
+## 0.78.0 - 2023-06-26
+
+### Added
+
+- Add stop_secure_channel test
+
+### Changed
+
+- Improve type safety for `FlowControls`
+- Hide `Spawner` vs `Producer` logic under the hood
+- Make sure that ephemeral secrets are removed from memory
+- Updated dependencies
+
+### Fixed
+
+- Extend channel test
+
+### Removed
+
+- Remove `FId`
+
+## 0.77.0 - 2023-06-09
+
+### Changed
+
+- Make `AccessControl` optional while starting a `Worker`
+- Updated dependencies
+
 ## 0.76.0 - 2023-05-26
 
 ### Changed
@@ -65,7 +158,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Use trust context within the creation of ockam_api secure channels
 - Introduce `TrustOptions::insecure()` and `::insecure_test()`
 - Improve `SecureChannelListener` `TrustOptions` for better support of consumer use case
-- Simplify `TrustOptions` for outgoing negotations
+- Simplify `TrustOptions` for outgoing negotiations
 - Rename `insecure_test` -> `new`
 - Rename `Sessions` -> `FlowControls`
 - Rename `TrustOptions` -> `Options`

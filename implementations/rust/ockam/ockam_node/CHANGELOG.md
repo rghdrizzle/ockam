@@ -4,6 +4,103 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## 0.93.0 - 2023-10-07
+
+### Changed
+
+- Use better names for request / response headers
+- Move the secure client close to secure channels
+- Adjust the code after rebase
+- Package all reply / response methods into a client
+- Use the client in the background node
+- Updated dependencies
+
+### Fixed
+
+- Fix some clippy warnings
+- Fix a no std warning
+
+### Removed
+
+- Remove two parameters from requests to the controller
+
+## 0.92.0 - 2023-10-05
+
+### Changed
+
+- Use better names for request / response headers
+- Move the secure client close to secure channels
+- Adjust the code after rebase
+- Package all reply / response methods into a client
+- Use the client in the background node
+- Updated dependencies
+
+### Fixed
+
+- Fix some clippy warnings
+- Fix a no std warning
+
+### Removed
+
+- Remove two parameters from requests to the controller
+
+## 0.91.0 - 2023-09-28
+
+### Changed
+
+- Updated dependencies
+
+## 0.90.0 - 2023-09-23
+
+### Changed
+
+- Switch to new `Identity` design
+- Updated dependencies
+
+## 0.89.0 - 2023-09-22
+
+### Changed
+
+- Switch to new `Identity` design
+- Updated dependencies
+
+## 0.88.0 - 2023-09-13
+
+### Changed
+
+- Updated dependencies
+
+## 0.87.0 - 2023-09-06
+
+### Changed
+
+- Introduce an app state holding a context
+- Updated dependencies
+
+### Removed
+
+- Removed api lifetimes to access node manager operations directly
+
+## 0.86.0 - 2023-06-26
+
+### Added
+
+- Add a debugger feature for the ockam_identity crate
+
+### Changed
+
+- Rebase on develop
+- Updated dependencies
+
+## 0.85.0 - 2023-06-09
+
+### Changed
+
+- Clean `FlowControls` resources on `Address` stop
+- Make `AccessControl` optional while starting a `Worker`
+- Improve `ProcessorBuilder`. make `AccessControl` optional while starting a `Processor`
+- Updated dependencies
+
 ## 0.84.0 - 2023-05-26
 
 ### Changed

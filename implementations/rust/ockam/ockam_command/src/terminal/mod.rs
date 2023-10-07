@@ -1,24 +1,27 @@
+use std::fmt::Write as _;
 use std::fmt::{Debug, Display};
 use std::io::Write;
 use std::time::Duration;
 
-use anyhow::{anyhow, Context as _};
+use colorful::Colorful;
 use indicatif::{ProgressBar, ProgressDrawTarget, ProgressStyle};
-
-use mode::*;
-use ockam_core::env::{get_env, get_env_with_default, FromString};
-use ockam_core::errcode::Kind;
+use miette::Context as _;
+use miette::{miette, IntoDiagnostic};
 use tokio::sync::Mutex;
 use tokio::time::sleep;
 
-use crate::{OutputFormat, Result};
+pub use colors::*;
+pub use fmt::*;
+use mode::*;
+use ockam_core::env::{get_env, get_env_with_default, FromString};
+use ockam_core::errcode::Kind;
+
+use crate::error::Error;
+use crate::{fmt_list, fmt_log, fmt_warn, OutputFormat, Result};
 
 pub mod colors;
 pub mod fmt;
 pub mod term;
-
-pub use colors::*;
-pub use fmt::*;
 
 /// A terminal abstraction to handle commands' output and messages styling.
 #[derive(Clone)]
@@ -29,6 +32,18 @@ pub struct Terminal<T: TerminalWriter, WriteMode = ToStdErr> {
     no_input: bool,
     output_format: OutputFormat,
     mode: WriteMode,
+}
+
+impl<T: TerminalWriter, W> Terminal<T, W> {
+    pub fn is_quiet(&self) -> bool {
+        self.quiet
+    }
+}
+
+impl<W: TerminalWriter> Default for Terminal<W> {
+    fn default() -> Self {
+        Terminal::new(false, false, false, OutputFormat::Plain)
+    }
 }
 
 pub enum ConfirmResult {
@@ -124,13 +139,15 @@ pub struct TerminalStream<T: Write + Debug + Clone> {
 }
 
 impl<T: Write + Debug + Clone> TerminalStream<T> {
-    fn prepare_msg(&self, msg: &str) -> Result<String> {
+    fn prepare_msg(&self, msg: impl AsRef<str>) -> Result<String> {
         let mut buffer = Vec::new();
-        write!(buffer, "{}", msg)?;
+        write!(buffer, "{}", msg.as_ref())?;
         if self.no_color {
-            buffer = strip_ansi_escapes::strip(&buffer)?;
+            buffer = strip_ansi_escapes::strip(&buffer);
         }
-        Ok(String::from_utf8(buffer).context("Invalid UTF-8")?)
+        Ok(String::from_utf8(buffer)
+            .into_diagnostic()
+            .context("Invalid UTF-8")?)
     }
 }
 
@@ -174,9 +191,9 @@ pub trait TerminalWriter: Clone {
     fn stderr(no_color: bool) -> Self;
     fn is_tty(&self) -> bool;
 
-    fn write(&mut self, s: &str) -> Result<()>;
-    fn rewrite(&mut self, s: &str) -> Result<()>;
-    fn write_line(&self, s: &str) -> Result<()>;
+    fn write(&mut self, s: impl AsRef<str>) -> Result<()>;
+    fn rewrite(&mut self, s: impl AsRef<str>) -> Result<()>;
+    fn write_line(&self, s: impl AsRef<str>) -> Result<()>;
 }
 
 // Core functions
@@ -196,8 +213,16 @@ impl<W: TerminalWriter> Terminal<W> {
         }
     }
 
+    pub fn is_tty(&self) -> bool {
+        self.stderr.is_tty()
+    }
+
+    pub fn quiet() -> Self {
+        Self::new(true, false, false, OutputFormat::Plain)
+    }
+
     /// Prompt the user for a confirmation.
-    pub fn confirm(&self, msg: &str) -> Result<ConfirmResult> {
+    pub fn confirm(&self, msg: impl AsRef<str>) -> Result<ConfirmResult> {
         if !self.can_ask_for_user_input() {
             return Ok(ConfirmResult::NonTTY);
         }
@@ -205,9 +230,26 @@ impl<W: TerminalWriter> Terminal<W> {
             dialoguer::Confirm::new()
                 .default(true)
                 .show_default(true)
-                .with_prompt(msg)
+                .with_prompt(fmt_warn!("{}", msg.as_ref()))
                 .interact()?,
         ))
+    }
+
+    pub fn confirmed_with_flag_or_prompt(
+        &self,
+        flag: bool,
+        prompt_msg: impl AsRef<str>,
+    ) -> Result<bool> {
+        if flag {
+            Ok(true)
+        } else {
+            // If the confirmation flag is not provided, prompt the user.
+            match self.confirm(prompt_msg)? {
+                ConfirmResult::Yes => Ok(true),
+                ConfirmResult::No => Ok(false),
+                ConfirmResult::NonTTY => Err(miette!("Use --yes to confirm").into()),
+            }
+        }
     }
 
     fn can_ask_for_user_input(&self) -> bool {
@@ -235,26 +277,74 @@ impl<W: TerminalWriter> Terminal<W> {
 
 // Logging mode
 impl<W: TerminalWriter> Terminal<W, ToStdErr> {
-    pub fn write(&self, msg: &str) -> Result<()> {
+    pub fn write(&self, msg: impl AsRef<str>) -> Result<()> {
         if self.quiet {
             return Ok(());
         }
         self.stderr.clone().write(msg)
     }
 
-    pub fn rewrite(&self, msg: &str) -> Result<()> {
+    pub fn rewrite(&self, msg: impl AsRef<str>) -> Result<()> {
         if self.quiet {
             return Ok(());
         }
         self.stderr.clone().rewrite(msg)
     }
 
-    pub fn write_line(&self, msg: &str) -> Result<&Self> {
-        if self.quiet {
+    pub fn write_line(&self, msg: impl AsRef<str>) -> Result<&Self> {
+        if self.quiet || !self.stdout.is_tty() || self.output_format != OutputFormat::Plain {
             return Ok(self);
         }
-        self.stderr.write_line(msg)?;
+
+        self.stderr
+            .write_line(msg)
+            .map_err(|e| Error::new_internal_error("Unable to write to stderr.", &e.to_string()))?;
         Ok(self)
+    }
+
+    pub fn build_list(
+        &self,
+        items: &[impl crate::output::Output],
+        header: &str,
+        empty_message: &str,
+    ) -> Result<String> {
+        let mut output = String::new();
+
+        // Display header
+        let header_len = header.len();
+        let padding = 7;
+        writeln!(
+            output,
+            "{}",
+            &fmt_log!("┌{}┐", "─".repeat(header_len + (padding * 2)))
+        )?;
+        writeln!(
+            output,
+            "{}",
+            &fmt_log!("│{}{header}{}│", " ".repeat(padding), " ".repeat(padding))
+        )?;
+        writeln!(
+            output,
+            "{}",
+            &fmt_log!("└{}┘\n", "─".repeat(header_len + (padding * 2)))
+        )?;
+
+        // Display empty message if items is empty
+        if items.is_empty() {
+            writeln!(output, "{}", &fmt_warn!("{empty_message}"))?;
+            return Ok(output);
+        }
+
+        // Display items with alternating colors
+        for item in items {
+            let item = item.list_output()?;
+            item.split('\n').for_each(|line| {
+                let _ = writeln!(output, "{}", &fmt_list!("{line}"));
+            });
+            writeln!(output)?;
+        }
+
+        Ok(output)
     }
 
     pub fn stdout(self) -> Terminal<W, ToStdOut> {
@@ -273,6 +363,10 @@ impl<W: TerminalWriter> Terminal<W, ToStdErr> {
 
 // Finished mode
 impl<W: TerminalWriter> Terminal<W, ToStdOut> {
+    pub fn is_tty(&self) -> bool {
+        self.stdout.is_tty()
+    }
+
     pub fn plain<T: Display>(mut self, msg: T) -> Self {
         self.mode.output.plain = Some(msg.to_string());
         self
@@ -289,16 +383,12 @@ impl<W: TerminalWriter> Terminal<W, ToStdOut> {
     }
 
     pub fn write_line(self) -> Result<()> {
-        if self.quiet {
-            return Ok(());
-        }
-
         // Check that there is at least one output format defined
         if self.mode.output.plain.is_none()
             && self.mode.output.machine.is_none()
             && self.mode.output.json.is_none()
         {
-            return Err(anyhow!("At least one output format must be defined").into());
+            return Err(miette!("At least one output format must be defined").into());
         }
 
         let plain = self.mode.output.plain.as_ref();
@@ -326,7 +416,9 @@ impl<W: TerminalWriter> Terminal<W, ToStdOut> {
                 }
             }
             // If not set, no fallback is provided and returns an error
-            OutputFormat::Json => json.context("JSON output is not defined for this command")?,
+            OutputFormat::Json => {
+                json.ok_or(miette!("JSON output is not defined for this command"))?
+            }
         };
         self.stdout.write_line(msg)
     }

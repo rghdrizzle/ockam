@@ -1,10 +1,13 @@
-mod create;
-
 use clap::{command, Args, Subcommand};
 
+use crate::kafka::producer::create::CreateCommand;
+use crate::kafka::producer::delete::DeleteCommand;
+use crate::kafka::producer::list::ListCommand;
 use crate::CommandGlobalOpts;
 
-use self::create::CreateCommand;
+mod create;
+mod delete;
+mod list;
 
 /// Manage Kafka Producers
 #[derive(Clone, Debug, Args)]
@@ -17,12 +20,16 @@ pub struct KafkaProducerCommand {
 #[derive(Clone, Debug, Subcommand)]
 pub enum KafkaProducerSubcommand {
     Create(CreateCommand),
+    Delete(DeleteCommand),
+    List(ListCommand),
 }
 
 impl KafkaProducerCommand {
     pub fn run(self, options: CommandGlobalOpts) {
         match self.subcommand {
             KafkaProducerSubcommand::Create(c) => c.run(options),
+            KafkaProducerSubcommand::Delete(c) => c.run(options),
+            KafkaProducerSubcommand::List(c) => c.run(options),
         }
     }
 }

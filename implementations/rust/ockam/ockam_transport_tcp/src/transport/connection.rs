@@ -30,7 +30,7 @@ impl TcpTransport {
         let addresses = Addresses::generate(mode);
 
         options.setup_flow_control(self.ctx.flow_controls(), &addresses);
-        let flow_control_id = options.producer_flow_control_id.clone();
+        let flow_control_id = options.flow_control_id.clone();
         let access_control = options.create_access_control(self.ctx.flow_controls());
 
         TcpSendWorker::start(
@@ -66,8 +66,8 @@ impl TcpTransport {
         ))
     }
 
-    /// Interrupt an active TCP connection given its `Address`
-    pub async fn disconnect(&self, address: &Address) -> Result<()> {
-        self.ctx.stop_worker(address.clone()).await
+    /// Interrupt an active TCP connection given its Sender `Address`
+    pub async fn disconnect(&self, address: impl Into<Address>) -> Result<()> {
+        self.ctx.stop_worker(address.into()).await
     }
 }

@@ -4,6 +4,107 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## 0.88.0 - 2023-10-07
+
+### Changed
+
+- Move the controller address to the node manager
+- Use better names for request / response headers
+- Use a more precise interface for the subscriptions trait
+- Use a secure client to enroll
+- Use the authority client to enroll
+- Package all reply / response methods into a client
+- Updated dependencies
+
+### Fixed
+
+- Fix the no_std task
+
+### Removed
+
+- Remove an unnecessary pattern match
+- Remove the unused tag feature
+
+## 0.87.0 - 2023-10-05
+
+### Changed
+
+- Move the controller address to the node manager
+- Use better names for request / response headers
+- Use a more precise interface for the subscriptions trait
+- Use a secure client to enroll
+- Use the authority client to enroll
+- Package all reply / response methods into a client
+- Updated dependencies
+
+### Fixed
+
+- Fix the no_std task
+
+### Removed
+
+- Remove an unnecessary pattern match
+- Remove the unused tag feature
+
+## 0.86.0 - 2023-09-28
+
+### Changed
+
+- Updated dependencies
+
+## 0.85.0 - 2023-09-13
+
+### Changed
+
+- Extract the output of request results from the rpc code
+- Updated dependencies
+
+## 0.84.0 - 2023-09-06
+
+### Added
+
+- Add popup window to tcp-outlet/service creation
+
+### Changed
+
+- Change some response functions
+- Updated dependencies
+
+### Fixed
+
+- Fix the cbor annotations for non-borrowed data
+
+### Removed
+
+- Removed api lifetimes to access node manager operations directly
+
+## 0.83.0 - 2023-06-26
+
+### Changed
+
+- Extract a full state machine for the secure channel handshake
+- Update ockam api services error responses to using a struct
+- Updated dependencies
+
+### Fixed
+
+- Fix compat imports
+- Include compat box for no-std
+
+### Removed
+
+- Remove verbose decode logic, add inner errors
+
+## 0.82.0 - 2023-06-09
+
+### Changed
+
+- Updated dependencies
+
+### Removed
+
+- Delete `LocalOnwardOnly` and `LocalSourceOnly`
+
 ## 0.81.0 - 2023-05-26
 
 ### Changed

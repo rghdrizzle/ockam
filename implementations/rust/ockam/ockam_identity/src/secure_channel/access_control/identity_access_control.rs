@@ -1,26 +1,25 @@
-use crate::identity::IdentityIdentifier;
-use crate::secure_channel::local_info::IdentitySecureChannelLocalInfo;
 use ockam_core::access_control::IncomingAccessControl;
 use ockam_core::async_trait;
 use ockam_core::compat::boxed::Box;
 use ockam_core::compat::vec::Vec;
 use ockam_core::{RelayMessage, Result};
 
+use crate::models::Identifier;
+use crate::secure_channel::local_info::IdentitySecureChannelLocalInfo;
+
 /// Builder for `Identity`-related AccessControls
 pub struct IdentityAccessControlBuilder;
 
 impl IdentityAccessControlBuilder {
     /// `IncomingAccessControl` that checks if the author of the message possesses
-    /// given `IdentityIdentifier`
-    pub fn new_with_id(their_identity_id: IdentityIdentifier) -> IdentityIdAccessControl {
+    /// given `Identifier`
+    pub fn new_with_id(their_identity_id: Identifier) -> IdentityIdAccessControl {
         IdentityIdAccessControl::new(vec![their_identity_id])
     }
 
     /// `IncomingAccessControl` that checks if the author of the message possesses
-    /// an `IdentityIdentifier` from the pre-known list
-    pub fn new_with_ids(
-        identity_ids: impl Into<Vec<IdentityIdentifier>>,
-    ) -> IdentityIdAccessControl {
+    /// an `Identifier` from the pre-known list
+    pub fn new_with_ids(identity_ids: impl Into<Vec<Identifier>>) -> IdentityIdAccessControl {
         IdentityIdAccessControl::new(identity_ids.into())
     }
 
@@ -31,7 +30,7 @@ impl IdentityAccessControlBuilder {
 }
 
 /// `IncomingAccessControl` check that succeeds if message came through a SecureChannel
-/// with any `IdentityIdentifier` (i.e. any SecureChannel)
+/// with any `Identifier` (i.e. any SecureChannel)
 #[derive(Debug)]
 pub struct IdentityAnyIdAccessControl;
 
@@ -42,25 +41,17 @@ impl IncomingAccessControl for IdentityAnyIdAccessControl {
     }
 }
 
-/// `IncomingAccessControl` check that succeeds if message came from some `IdentityIdentifier`
+/// `IncomingAccessControl` check that succeeds if message came from some `Identifier`
 /// from a pre-known list
 #[derive(Clone, Debug)]
 pub struct IdentityIdAccessControl {
-    identity_ids: Vec<IdentityIdentifier>,
+    identity_ids: Vec<Identifier>,
 }
 
 impl IdentityIdAccessControl {
     /// Constructor
-    pub fn new(identity_ids: Vec<IdentityIdentifier>) -> Self {
+    pub fn new(identity_ids: Vec<Identifier>) -> Self {
         Self { identity_ids }
-    }
-
-    fn contains(&self, their_id: &IdentityIdentifier) -> bool {
-        let mut found = subtle::Choice::from(0);
-        for trusted_id in &self.identity_ids {
-            found |= trusted_id.ct_eq(their_id);
-        }
-        found.into()
     }
 }
 
@@ -70,7 +61,9 @@ impl IncomingAccessControl for IdentityIdAccessControl {
         if let Ok(msg_identity_id) =
             IdentitySecureChannelLocalInfo::find_info(relay_msg.local_message())
         {
-            Ok(self.contains(&msg_identity_id.their_identity_id()))
+            Ok(self
+                .identity_ids
+                .contains(&msg_identity_id.their_identity_id()))
         } else {
             Ok(false)
         }

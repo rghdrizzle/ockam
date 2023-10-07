@@ -1,42 +1,23 @@
+use crate::cloud::Controller;
+use miette::IntoDiagnostic;
 use minicbor::{Decode, Encode};
+use ockam_core::api::Request;
+use ockam_core::async_trait;
+use ockam_node::Context;
 use serde::{Deserialize, Serialize};
+use tracing::trace;
 
-use ockam_core::CowStr;
-#[cfg(feature = "tag")]
-use ockam_core::TypeTag;
-
-#[derive(Encode, Decode, Serialize, Deserialize, Debug)]
+#[derive(Encode, Decode, Serialize, Deserialize, Debug, Clone)]
 #[cbor(map)]
-pub struct Operation<'a> {
-    #[cfg(feature = "tag")]
-    #[serde(skip)]
-    #[cbor(n(0))]
-    pub tag: TypeTag<2432199>,
-
-    #[cbor(b(1))]
-    #[serde(borrow)]
-    pub id: CowStr<'a>,
+pub struct Operation {
+    #[cbor(n(1))]
+    pub id: String,
 
     #[cbor(n(2))]
     pub status: Status,
 }
 
-impl Clone for Operation<'_> {
-    fn clone(&self) -> Self {
-        self.to_owned()
-    }
-}
-
-impl Operation<'_> {
-    pub fn to_owned<'r>(&self) -> Operation<'r> {
-        Operation {
-            #[cfg(feature = "tag")]
-            tag: self.tag.to_owned(),
-            id: self.id.to_owned(),
-            status: self.status.clone(),
-        }
-    }
-
+impl Operation {
     pub fn is_successful(&self) -> bool {
         self.status == Status::Succeeded
     }
@@ -50,33 +31,11 @@ impl Operation<'_> {
     }
 }
 
-#[derive(Encode, Decode, Serialize, Deserialize, Debug, Default)]
+#[derive(Encode, Decode, Serialize, Deserialize, Debug, Default, Clone)]
 #[cbor(map)]
-pub struct CreateOperationResponse<'a> {
-    #[cfg(feature = "tag")]
-    #[serde(skip)]
-    #[cbor(n(0))]
-    pub tag: TypeTag<9056534>,
-
-    #[cbor(b(1))]
-    #[serde(borrow)]
-    pub operation_id: CowStr<'a>,
-}
-
-impl Clone for CreateOperationResponse<'_> {
-    fn clone(&self) -> Self {
-        self.to_owned()
-    }
-}
-
-impl CreateOperationResponse<'_> {
-    pub fn to_owned<'r>(&self) -> CreateOperationResponse<'r> {
-        CreateOperationResponse {
-            #[cfg(feature = "tag")]
-            tag: self.tag.to_owned(),
-            operation_id: self.operation_id.to_owned(),
-        }
-    }
+pub struct CreateOperationResponse {
+    #[cbor(n(1))]
+    pub operation_id: String,
 }
 
 #[derive(Encode, Decode, Serialize, Deserialize, Debug, Clone, PartialEq)]
@@ -88,45 +47,32 @@ pub enum Status {
     #[n(2)] Failed,
 }
 
-mod node {
-    use minicbor::Decoder;
-    use tracing::trace;
+#[async_trait]
+pub trait Operations {
+    async fn get_operation(
+        &self,
+        ctx: &Context,
+        operation_id: &str,
+    ) -> miette::Result<Option<Operation>>;
+}
 
-    use ockam_core::api::Request;
-    use ockam_core::{self, Result};
-    use ockam_node::Context;
+const TARGET: &str = "ockam_api::cloud::operation";
+const API_SERVICE: &str = "projects";
 
-    use crate::cloud::BareCloudRequestWrapper;
-    use crate::nodes::NodeManagerWorker;
-
-    const TARGET: &str = "ockam_api::cloud::operation";
-    const API_SERVICE: &str = "projects";
-
-    impl NodeManagerWorker {
-        pub(crate) async fn get_operation(
-            &mut self,
-            ctx: &mut Context,
-            dec: &mut Decoder<'_>,
-            operation_id: &str,
-        ) -> Result<Vec<u8>> {
-            let req_wrapper: BareCloudRequestWrapper = dec.decode()?;
-            let cloud_multiaddr = req_wrapper.multiaddr()?;
-
-            let label = "get_operation";
-            trace!(target: TARGET, operation_id, "getting operation");
-
-            let req_builder = Request::get(format!("/v1/operations/{operation_id}"));
-
-            self.request_controller(
-                ctx,
-                label,
-                None,
-                &cloud_multiaddr,
-                API_SERVICE,
-                req_builder,
-                None,
-            )
+#[async_trait]
+impl Operations for Controller {
+    async fn get_operation(
+        &self,
+        ctx: &Context,
+        operation_id: &str,
+    ) -> miette::Result<Option<Operation>> {
+        trace!(target: TARGET, operation_id, "getting operation");
+        let req = Request::get(format!("/v1/operations/{operation_id}"));
+        self.0
+            .ask(ctx, API_SERVICE, req)
             .await
-        }
+            .into_diagnostic()?
+            .found()
+            .into_diagnostic()
     }
 }

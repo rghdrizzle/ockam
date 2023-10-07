@@ -1,6 +1,6 @@
 [package]
 name = "ockam_api"
-version = "0.31.0"
+version = "0.40.0"
 authors = ["Ockam Developers"]
 edition = "2021"
 homepage = "https://github.com/ockam-network/ockam"
@@ -10,14 +10,14 @@ repository = "https://github.com/ockam-network/ockam/implementations/rust/ockam/
 description = "Ockam's request-response API"
 
 [features]
-default = ["std", "direct-authenticator"]
+default = ["std"]
 std = [
   "either/use_std",
   "hex/std",
   "minicbor/std",
   "ockam_core/std",
   "ockam_abac/std",
-  "ockam_identity/std",
+  "ockam/std",
   "ockam_multiaddr/std",
   "ockam_node/std",
   "ockam_vault/std",
@@ -25,55 +25,55 @@ std = [
   "tinyvec/std",
   "tracing/std",
 ]
-tag = ["cddl-cat", "once_cell", "ockam_core/tag"]
 vault-storage = ["ockam_vault/storage"]
-authenticators = ["direct-authenticator"]
-direct-authenticator = ["std"]
 
 [dependencies]
 anyhow = "1"
-aws-config = { version = "0.55.3", default-features = false, features = ["native-tls"] }
-bytes = { version = "1.4.0", default-features = false, features = ["serde"] }
-cddl-cat = { version = "0.6.1", optional = true }
-either = { version = "1.8.1", default-features = false }
+aws-config = { version = "0.56.1", default-features = false, features = ["rustls"] }
+base64-url = "2.0.0"
+bytes = { version = "1.5.0", default-features = false, features = ["serde"] }
+either = { version = "1.9.0", default-features = false }
 hex = { version = "0.4.3", default-features = false, features = ["alloc", "serde"] }
 home = "0.5"
-kafka-protocol = "0.6.0"
-lru = "0.10.0"
-minicbor = { version = "0.19.0", features = ["alloc", "derive"] }
-nix = "0.26"
-once_cell = { version = "1", optional = true, default-features = false }
+kafka-protocol = "0.7.0"
+lru = "0.12.0"
+miette = "5.10.0"
+minicbor = { version = "0.20.0", features = ["alloc", "derive"] }
+nix = { version = "0.27", features = ["signal"] }
+open = "5.0.0"
+petname = { version = "2.0.0-beta.2", default-features = false, features = ["default-rng", "default-words"] }
 rand = "0.8"
 reqwest = { version = "0.11", default-features = false, features = ["json", "rustls-tls-native-roots"] }
-rust-embed = "6"
-serde = { version = "1.0.163", features = ["derive"] }
-serde_json = "1.0.96"
+serde = { version = "1.0.188", features = ["derive"] }
+serde_json = "1.0.107"
 sysinfo = "0.29"
-tempfile = "3.5.0"
+tempfile = "3.8.0"
 thiserror = "1.0"
-time = { version = "0.3.21", default-features = false }
+time = { version = "0.3.29", default-features = false }
+tiny_http = "0.12.0"
 tinyvec = { version = "1.6.0", features = ["rustc_1_57"] }
+tokio = { version = "1.31.0", features = ["full"] }
 tokio-retry = "0.3.0"
 tracing = { version = "0.1", default-features = false }
+url = "2.4.1"
 
-ockam = { path = "../ockam", version = "^0.88.0", features = ["software_vault"] }
-ockam_multiaddr = { path = "../ockam_multiaddr", version = "0.22.0", features = ["cbor", "serde"] }
-ockam_transport_tcp = { path = "../ockam_transport_tcp", version = "^0.82.0" }
+ockam_multiaddr = { path = "../ockam_multiaddr", version = "0.31.0", features = ["cbor", "serde"] }
+ockam_transport_tcp = { path = "../ockam_transport_tcp", version = "^0.91.0" }
 
 [dependencies.ockam_core]
-version = "0.81.0"
+version = "0.88.0"
 path = "../ockam_core"
 default-features = false
 features = ["no_std", "alloc"]
 
 [dependencies.ockam_node]
-version = "0.84.0"
+version = "0.93.0"
 path = "../ockam_node"
 default-features = false
 features = ["no_std", "alloc"]
 
 [dependencies.ockam_vault]
-version = "0.77.0"
+version = "0.86.0"
 path = "../ockam_vault"
 default-features = false
 # FIXME: ockam_vault's dependency curve25519-dalek has non-additive features which
@@ -81,19 +81,19 @@ default-features = false
 features = ["std"]
 
 [dependencies.ockam_vault_aws]
-version = "0.2.0"
+version = "0.11.0"
 path = "../ockam_vault_aws"
 default-features = false
 features = ["std"]
 
-[dependencies.ockam_identity]
-version = "0.76.0"
-path = "../ockam_identity"
+[dependencies.ockam]
+version = "^0.97.0"
+path = "../ockam"
 default-features = false
-features = ["std"]
+features = ["ockam_transport_tcp", "software_vault_storage"]
 
 [dependencies.ockam_abac]
-version = "0.22.0"
+version = "0.31.0"
 path = "../ockam_abac"
 default-features = false
 
@@ -101,12 +101,11 @@ default-features = false
 cddl-cat = "0.6.1"
 fake = { version = "2", features = ['derive', 'uuid'] }
 hex = "0.4.3"
-indexmap = "1.7.0"
+indexmap = "2.0.2"
 mockall = "0.11"
-# TODO enable "tag" feature once implemented on elixir side
-ockam_api = { path = ".", features = ["std", "authenticators"] }
-ockam_macros = { version = "0.30.0", path = "../ockam_macros", features = ["std"] }
-ockam_transport_tcp = { version = "0.82.0", path = "../ockam_transport_tcp" }
+ockam_macros = { path = "../ockam_macros", features = ["std"] }
+ockam_transport_tcp = { path = "../ockam_transport_tcp" }
+once_cell = { version = "1", default-features = false }
 quickcheck = "1.0.1"
-tokio = { version = "1.28.2", features = ["full"] }
-uuid = "1.3.3"
+tokio = { version = "1.31.0", features = ["full"] }
+uuid = "1.4.1"

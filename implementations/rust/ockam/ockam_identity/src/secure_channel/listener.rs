@@ -1,24 +1,26 @@
-use crate::secure_channel::addresses::Addresses;
-use crate::secure_channel::common::Role;
-use crate::secure_channel::options::SecureChannelListenerOptions;
-use crate::secure_channel::responder_worker::ResponderWorker;
-use crate::secure_channels::secure_channels::SecureChannels;
-use crate::IdentityIdentifier;
 use ockam_core::compat::boxed::Box;
 use ockam_core::compat::sync::Arc;
-use ockam_core::{Address, AllowAll, Any, LocalOnwardOnly, Result, Routed, Worker};
+use ockam_core::compat::vec::Vec;
+use ockam_core::{Address, Any, Result, Routed, Worker};
 use ockam_node::Context;
+
+use crate::models::{CredentialAndPurposeKey, Identifier};
+use crate::secure_channel::addresses::Addresses;
+use crate::secure_channel::handshake_worker::HandshakeWorker;
+use crate::secure_channel::options::SecureChannelListenerOptions;
+use crate::secure_channel::role::Role;
+use crate::secure_channels::secure_channels::SecureChannels;
 
 pub(crate) struct IdentityChannelListener {
     secure_channels: Arc<SecureChannels>,
-    identifier: IdentityIdentifier,
+    identifier: Identifier,
     options: SecureChannelListenerOptions,
 }
 
 impl IdentityChannelListener {
     fn new(
         secure_channels: Arc<SecureChannels>,
-        identifier: IdentityIdentifier,
+        identifier: Identifier,
         options: SecureChannelListenerOptions,
     ) -> Self {
         Self {
@@ -31,7 +33,7 @@ impl IdentityChannelListener {
     pub async fn create(
         ctx: &Context,
         secure_channels: Arc<SecureChannels>,
-        identifier: &IdentityIdentifier,
+        identifier: &Identifier,
         address: Address,
         options: SecureChannelListenerOptions,
     ) -> Result<()> {
@@ -39,15 +41,29 @@ impl IdentityChannelListener {
 
         let listener = Self::new(secure_channels.clone(), identifier.clone(), options);
 
-        ctx.start_worker(
-            address,
-            listener,
-            AllowAll, // TODO: @ac allow to customize
-            LocalOnwardOnly,
-        )
-        .await?;
+        ctx.start_worker(address, listener).await?;
 
         Ok(())
+    }
+
+    /// If credentials are not provided via list in options
+    /// get them from the trust context
+    async fn get_credentials(&self, ctx: &mut Context) -> Result<Vec<CredentialAndPurposeKey>> {
+        let credentials = if self.options.credentials.is_empty() {
+            if let Some(trust_context) = &self.options.trust_context {
+                vec![
+                    trust_context
+                        .authority()?
+                        .credential(ctx, &self.identifier)
+                        .await?,
+                ]
+            } else {
+                vec![]
+            }
+        } else {
+            self.options.credentials.clone()
+        };
+        Ok(credentials)
     }
 }
 
@@ -71,30 +87,30 @@ impl Worker for IdentityChannelListener {
             .options
             .create_access_control(ctx.flow_controls(), flow_control_id);
 
-        let credentials = if self.options.credentials.is_empty() {
-            if let Some(trust_context) = &self.options.trust_context {
-                vec![
-                    trust_context
-                        .authority()?
-                        .credential(ctx, &self.identifier)
-                        .await?,
-                ]
-            } else {
-                vec![]
-            }
-        } else {
-            self.options.credentials.clone()
-        };
+        let credentials = self.get_credentials(ctx).await?;
 
-        let decryptor_remote_address = ResponderWorker::create(
+        // TODO: Allow manual PurposeKey management
+        let purpose_key = self
+            .secure_channels
+            .identities
+            .purpose_keys()
+            .purpose_keys_creation()
+            .get_or_create_secure_channel_purpose_key(&self.identifier)
+            .await?;
+
+        HandshakeWorker::create(
             ctx,
             self.secure_channels.clone(),
-            addresses,
+            addresses.clone(),
             self.identifier.clone(),
+            purpose_key,
             self.options.trust_policy.clone(),
             access_control.decryptor_outgoing_access_control,
             credentials,
             self.options.trust_context.clone(),
+            None,
+            None,
+            Role::Responder,
         )
         .await?;
 
@@ -103,7 +119,7 @@ impl Worker for IdentityChannelListener {
             .transport_mut()
             .onward_route
             .modify()
-            .replace(decryptor_remote_address);
+            .replace(addresses.decryptor_remote);
 
         ctx.forward(local_message).await
     }

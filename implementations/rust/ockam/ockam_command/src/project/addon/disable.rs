@@ -3,21 +3,13 @@ use clap::Args;
 use colorful::Colorful;
 
 use ockam::Context;
+use ockam_api::cloud::addon::Addons;
+use ockam_api::nodes::InMemoryNode;
 
-use ockam_api::cloud::addon::DisableAddon;
-use ockam_api::cloud::operation::CreateOperationResponse;
-use ockam_api::cloud::CloudRequestWrapper;
-use ockam_core::api::Request;
-use ockam_core::CowStr;
-
-use crate::node::util::delete_embedded_node;
 use crate::operation::util::check_for_completion;
-use crate::project::addon::disable_addon_endpoint;
-
-use crate::util::api::CloudOpts;
-
-use crate::util::{node_rpc, Rpc};
-use crate::{fmt_ok, CommandGlobalOpts, Result};
+use crate::project::addon::get_project_id;
+use crate::util::node_rpc;
+use crate::{fmt_ok, CommandGlobalOpts};
 
 /// Disable an addon for a project
 #[derive(Clone, Debug, Args)]
@@ -42,39 +34,28 @@ pub struct AddonDisableSubcommand {
 }
 
 impl AddonDisableSubcommand {
-    pub fn run(self, opts: CommandGlobalOpts, cloud_opts: CloudOpts) {
-        node_rpc(run_impl, (opts, cloud_opts, self));
+    pub fn run(self, opts: CommandGlobalOpts) {
+        node_rpc(run_impl, (opts, self));
     }
 }
 
 async fn run_impl(
     ctx: Context,
-    (opts, cloud_opts, cmd): (CommandGlobalOpts, CloudOpts, AddonDisableSubcommand),
-) -> Result<()> {
-    let controller_route = &cloud_opts.route();
+    (opts, cmd): (CommandGlobalOpts, AddonDisableSubcommand),
+) -> miette::Result<()> {
     let AddonDisableSubcommand {
         project_name,
         addon_id,
     } = cmd;
+    let project_id = get_project_id(&opts.state, project_name.as_str())?;
+    let node = InMemoryNode::start(&ctx, &opts.state).await?;
+    let controller = node.create_controller().await?;
 
-    let mut rpc = Rpc::embedded(&ctx, &opts).await?;
-    let body = DisableAddon::new(addon_id);
-    let endpoint = disable_addon_endpoint(&opts.state, &project_name)?;
-
-    let req = Request::post(endpoint).body(CloudRequestWrapper::new(
-        body,
-        controller_route,
-        None::<CowStr>,
-    ));
-    rpc.request(req).await?;
-    let res = rpc.parse_response::<CreateOperationResponse>()?;
-    let operation_id = res.operation_id;
-
-    check_for_completion(&ctx, &opts, &cloud_opts, rpc.node_name(), &operation_id).await?;
+    let response = controller.disable_addon(&ctx, project_id, addon_id).await?;
+    let operation_id = response.operation_id;
+    check_for_completion(&opts, &ctx, &controller, &operation_id).await?;
 
     opts.terminal
         .write_line(&fmt_ok!("Addon disabled successfully"))?;
-
-    delete_embedded_node(&opts, rpc.node_name()).await;
     Ok(())
 }

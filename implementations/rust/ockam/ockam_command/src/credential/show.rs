@@ -1,8 +1,11 @@
 use clap::{arg, Args};
 use colorful::Colorful;
+use miette::IntoDiagnostic;
 use ockam::Context;
 use ockam_api::cli_state::{StateDirTrait, StateItemTrait};
 
+use crate::credential::identities;
+use crate::output::CredentialAndPurposeKeyDisplay;
 use crate::{
     credential::validate_encoded_cred, util::node_rpc, vault::default_vault_name, CommandGlobalOpts,
 };
@@ -25,7 +28,7 @@ impl ShowCommand {
 async fn run_impl(
     _ctx: Context,
     (opts, cmd): (CommandGlobalOpts, ShowCommand),
-) -> crate::Result<()> {
+) -> miette::Result<()> {
     let vault_name = cmd
         .vault
         .clone()
@@ -37,15 +40,24 @@ pub(crate) async fn display_credential(
     opts: &CommandGlobalOpts,
     cred_name: &str,
     vault_name: &str,
-) -> crate::Result<()> {
+) -> miette::Result<()> {
     let cred = opts.state.credentials.get(cred_name)?;
     let cred_config = cred.config();
 
+    let identities = identities(vault_name, opts).await?;
+    identities
+        .identities_creation()
+        .import(
+            Some(&cred_config.issuer_identifier),
+            &cred_config.encoded_issuer_change_history,
+        )
+        .await
+        .into_diagnostic()?;
+
     let is_verified = match validate_encoded_cred(
         &cred_config.encoded_credential,
-        &cred_config.issuer.identifier(),
-        vault_name,
-        opts,
+        identities,
+        &cred_config.issuer_identifier,
     )
     .await
     {
@@ -55,7 +67,7 @@ pub(crate) async fn display_credential(
 
     let cred = cred_config.credential()?;
     println!("Credential: {cred_name} {is_verified}");
-    println!("{cred}");
+    println!("{}", CredentialAndPurposeKeyDisplay(cred));
 
     Ok(())
 }

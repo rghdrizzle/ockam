@@ -1,13 +1,16 @@
-use crate::node::{get_node_name, initialize_node_if_default};
-use crate::util::Rpc;
-use crate::util::{node_rpc, parse_node_name};
-use crate::{docs, CommandGlobalOpts};
 use clap::Args;
-use ockam_api::nodes::models;
-use ockam_api::nodes::models::transport::CreateTcpListener;
+use miette::IntoDiagnostic;
+
+use ockam_api::nodes::models::transport::{CreateTcpListener, TransportStatus};
+use ockam_api::nodes::BackgroundNode;
 use ockam_core::api::Request;
 use ockam_multiaddr::proto::{DnsAddr, Tcp};
 use ockam_multiaddr::MultiAddr;
+use ockam_node::Context;
+
+use crate::node::{get_node_name, initialize_node_if_default};
+use crate::util::{node_rpc, parse_node_name};
+use crate::{docs, CommandGlobalOpts};
 
 const AFTER_LONG_HELP: &str = include_str!("./static/create/after_long_help.txt");
 
@@ -31,21 +34,26 @@ impl CreateCommand {
 }
 
 async fn run_impl(
-    ctx: ockam::Context,
+    ctx: Context,
     (opts, cmd): (CommandGlobalOpts, CreateCommand),
-) -> crate::Result<()> {
+) -> miette::Result<()> {
     let node_name = get_node_name(&opts.state, &cmd.at);
     let node_name = parse_node_name(&node_name)?;
-    let mut rpc = Rpc::background(&ctx, &opts, &node_name)?;
-    rpc.request(Request::post("/node/tcp/listener").body(CreateTcpListener::new(cmd.address)))
+    let node = BackgroundNode::create(&ctx, &opts.state, &node_name).await?;
+    let transport_status: TransportStatus = node
+        .ask(
+            &ctx,
+            Request::post("/node/tcp/listener").body(CreateTcpListener::new(cmd.address)),
+        )
         .await?;
-    let response = rpc.parse_response::<models::transport::TransportStatus>()?;
 
-    let socket = response.socket_addr()?;
+    let socket = transport_status.socket_addr().into_diagnostic()?;
     let port = socket.port();
     let mut multiaddr = MultiAddr::default();
-    multiaddr.push_back(DnsAddr::new("localhost"))?;
-    multiaddr.push_back(Tcp::new(port))?;
+    multiaddr
+        .push_back(DnsAddr::new("localhost"))
+        .into_diagnostic()?;
+    multiaddr.push_back(Tcp::new(port)).into_diagnostic()?;
     println!("Tcp listener created! You can send messages to it via this route:\n`{multiaddr}`");
 
     Ok(())

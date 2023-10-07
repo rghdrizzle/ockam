@@ -1,25 +1,23 @@
+use crate::util::duration::duration_parser;
 use clap::Args;
-use ockam_api::cloud::ORCHESTRATOR_RESTART_TIMEOUT;
 use ockam_api::config::cli::TrustContextConfig;
 use ockam_api::identity::EnrollmentTicket;
 use std::collections::HashMap;
 use std::time::Duration;
 
-use anyhow::{anyhow, Context as _};
-use ockam::identity::IdentityIdentifier;
+use miette::{miette, IntoDiagnostic};
+use ockam::identity::Identifier;
 use ockam::Context;
-use ockam_api::authenticator::direct::{DirectAuthenticatorClient, TokenIssuerClient};
+use ockam_api::authenticator::enrollment_tokens::{Members, TokenIssuer};
 use ockam_api::cli_state::{CliState, StateDirTrait, StateItemTrait};
 use ockam_api::config::lookup::{ProjectAuthority, ProjectLookup};
-use ockam_api::DefaultAddress;
-use ockam_core::route;
+use ockam_api::nodes::InMemoryNode;
+
 use ockam_multiaddr::{proto, MultiAddr, Protocol};
-use ockam_node::RpcClient;
 
 use crate::identity::{get_identity_name, initialize_identity_if_default};
-use crate::node::util::{delete_embedded_node, start_embedded_node};
-use crate::project::util::create_secure_channel_to_authority;
-use crate::util::api::{parse_trust_context, CloudOpts, TrustContextOpts};
+
+use crate::util::api::{CloudOpts, TrustContextOpts};
 use crate::util::node_rpc;
 use crate::{docs, CommandGlobalOpts, Result};
 
@@ -40,8 +38,8 @@ pub struct TicketCommand {
     #[command(flatten)]
     trust_opts: TrustContextOpts,
 
-    #[arg(long, short)]
-    member: Option<IdentityIdentifier>,
+    #[arg(long, short, conflicts_with = "expires_in")]
+    member: Option<Identifier>,
 
     #[arg(long, short, default_value = "/project/default")]
     to: MultiAddr,
@@ -49,148 +47,105 @@ pub struct TicketCommand {
     /// Attributes in `key=value` format to be attached to the member
     #[arg(short, long = "attribute", value_name = "ATTRIBUTE")]
     attributes: Vec<String>,
+
+    #[arg(long = "expires-in", value_name = "DURATION", conflicts_with = "member", value_parser=duration_parser)]
+    expires_in: Option<Duration>,
 }
 
 impl TicketCommand {
-    pub fn run(self, options: CommandGlobalOpts) {
-        initialize_identity_if_default(&options, &self.cloud_opts.identity);
-        node_rpc(
-            |ctx, (opts, cmd)| Runner::new(ctx, opts, cmd).run(),
-            (options, self),
-        );
+    pub fn run(self, opts: CommandGlobalOpts) {
+        initialize_identity_if_default(&opts, &self.cloud_opts.identity);
+        node_rpc(run_impl, (opts, self));
     }
 
     fn attributes(&self) -> Result<HashMap<&str, &str>> {
         let mut attributes = HashMap::new();
         for attr in &self.attributes {
             let mut parts = attr.splitn(2, '=');
-            let key = parts.next().context("key expected")?;
-            let value = parts.next().context("value expected)")?;
+            let key = parts.next().ok_or(miette!("key expected"))?;
+            let value = parts.next().ok_or(miette!("value expected)"))?;
             attributes.insert(key, value);
         }
         Ok(attributes)
     }
 }
 
-struct Runner {
+async fn run_impl(
     ctx: Context,
-    opts: CommandGlobalOpts,
-    cmd: TicketCommand,
-}
+    (opts, cmd): (CommandGlobalOpts, TicketCommand),
+) -> miette::Result<()> {
+    let trust_context_config = cmd.trust_opts.to_config(&opts.state)?.build();
+    let node = InMemoryNode::start_with_trust_context(
+        &ctx,
+        &opts.state,
+        cmd.trust_opts.project_path.as_ref(),
+        trust_context_config,
+    )
+    .await?;
 
-impl Runner {
-    fn new(ctx: Context, opts: CommandGlobalOpts, cmd: TicketCommand) -> Self {
-        Self { ctx, opts, cmd }
+    let mut project: Option<ProjectLookup> = None;
+    let mut trust_context: Option<TrustContextConfig> = None;
+
+    let authority_node = if let Some(tc) = cmd.trust_opts.trust_context.as_ref() {
+        let tc = &opts.state.trust_contexts.read_config_from_path(tc)?;
+        trust_context = Some(tc.clone());
+        let cred_retr = tc
+            .authority()
+            .into_diagnostic()?
+            .own_credential()
+            .into_diagnostic()?;
+        let addr = match cred_retr {
+            ockam_api::config::cli::CredentialRetrieverConfig::FromCredentialIssuer(c) => {
+                &c.multiaddr
+            }
+            _ => {
+                return Err(miette!(
+                    "Trust context must be configured with a credential issuer"
+                ));
+            }
+        };
+        let identity = get_identity_name(&opts.state, &cmd.cloud_opts.identity);
+        let authority_identifier = tc
+            .authority()
+            .into_diagnostic()?
+            .identity()
+            .await
+            .into_diagnostic()?
+            .identifier()
+            .clone();
+
+        node.create_authority_client(&authority_identifier, addr, Some(identity))
+            .await?
+    } else if let (Some(p), Some(a)) = get_project(&opts.state, &cmd.to).await? {
+        let identity = get_identity_name(&opts.state, &cmd.cloud_opts.identity);
+        project = Some(p);
+        node.create_authority_client(a.identity_id(), a.address(), Some(identity))
+            .await?
+    } else {
+        return Err(miette!("Cannot create a ticket. Please specify a route to your project or to an authority node"));
+    };
+    // If an identity identifier is given add it as a member, otherwise
+    // request an enrollment token that a future member can use to get a
+    // credential.
+    if let Some(id) = &cmd.member {
+        authority_node
+            .add_member(&ctx, id.clone(), cmd.attributes()?)
+            .await?
+    } else {
+        let token = authority_node
+            .create_token(&ctx, cmd.attributes()?, cmd.expires_in)
+            .await?;
+
+        let ticket = EnrollmentTicket::new(token, project, trust_context);
+        let ticket_serialized = ticket.hex_encoded().into_diagnostic()?;
+        opts.terminal
+            .clone()
+            .stdout()
+            .machine(ticket_serialized)
+            .write_line()?;
     }
 
-    async fn run(self) -> Result<()> {
-        let node_name =
-            start_embedded_node(&self.ctx, &self.opts, Some(&self.cmd.trust_opts)).await?;
-
-        let mut project: Option<ProjectLookup> = None;
-        let mut trust_context: Option<TrustContextConfig> = None;
-
-        let (base_addr, _flow_control_id) =
-            if let Some(tc) = self.cmd.trust_opts.trust_context.as_ref() {
-                let tc = parse_trust_context(&self.opts.state, tc)?;
-                trust_context = Some(tc.clone());
-                let cred_retr = tc.authority()?.own_credential()?;
-                let addr = match cred_retr {
-                    ockam_api::config::cli::CredentialRetrieverConfig::FromCredentialIssuer(c) => {
-                        &c.multiaddr
-                    }
-                    _ => {
-                        return Err(anyhow!(
-                            "Trust context must be configured with a credential issuer"
-                        )
-                        .into());
-                    }
-                };
-                let identity = get_identity_name(&self.opts.state, &self.cmd.cloud_opts.identity);
-                let (sc_addr, sc_flow_control_id) = create_secure_channel_to_authority(
-                    &self.ctx,
-                    &self.opts,
-                    &node_name,
-                    tc.authority()?.identity().await?.identifier().clone(),
-                    addr,
-                    Some(identity),
-                )
-                .await?;
-
-                (sc_addr, Some(sc_flow_control_id))
-            } else if let (Some(p), Some(a)) = get_project(&self.opts.state, &self.cmd.to).await? {
-                let identity = get_identity_name(&self.opts.state, &self.cmd.cloud_opts.identity);
-                let (sc_addr, sc_flow_control_id) = create_secure_channel_to_authority(
-                    &self.ctx,
-                    &self.opts,
-                    &node_name,
-                    a.identity_id().clone(),
-                    a.address(),
-                    Some(identity),
-                )
-                .await?;
-
-                project = Some(p);
-                (sc_addr, Some(sc_flow_control_id))
-            } else {
-                (self.cmd.to.clone(), None)
-            };
-        // If an identity identifier is given add it as a member, otherwise
-        // request an enrollment token that a future member can use to get a
-        // credential.
-        if let Some(id) = &self.cmd.member {
-            let direct_authenticator_route = {
-                let service = MultiAddr::try_from(
-                    format!("/service/{}", DefaultAddress::DIRECT_AUTHENTICATOR).as_str(),
-                )?;
-                let mut addr = base_addr.clone();
-                for proto in service.iter() {
-                    addr.push_back_value(&proto)?;
-                }
-                ockam_api::local_multiaddr_to_route(&addr)
-                    .context(format!("Invalid MultiAddr {addr}"))?
-            };
-            let client = DirectAuthenticatorClient::new(
-                RpcClient::new(
-                    route![DefaultAddress::RPC_PROXY, direct_authenticator_route],
-                    &self.ctx,
-                )
-                .await?
-                .with_timeout(Duration::from_secs(ORCHESTRATOR_RESTART_TIMEOUT)),
-            );
-            client
-                .add_member(id.clone(), self.cmd.attributes()?)
-                .await?
-        } else {
-            let token_issuer_route = {
-                let service = MultiAddr::try_from(
-                    format!("/service/{}", DefaultAddress::ENROLLMENT_TOKEN_ISSUER).as_str(),
-                )?;
-                let mut addr = base_addr.clone();
-                for proto in service.iter() {
-                    addr.push_back_value(&proto)?;
-                }
-                ockam_api::local_multiaddr_to_route(&addr)
-                    .context(format!("Invalid MultiAddr {addr}"))?
-            };
-            let client = TokenIssuerClient::new(
-                RpcClient::new(
-                    route![DefaultAddress::RPC_PROXY, token_issuer_route],
-                    &self.ctx,
-                )
-                .await?
-                .with_timeout(Duration::from_secs(ORCHESTRATOR_RESTART_TIMEOUT)),
-            );
-            let token = client.create_token(self.cmd.attributes()?).await?;
-
-            let ticket = EnrollmentTicket::new(token, project, trust_context);
-            let ticket_serialized = hex::encode(serde_json::to_vec(&ticket)?);
-            print!("{}", ticket_serialized)
-        }
-
-        delete_embedded_node(&self.opts, &node_name).await;
-        Ok(())
-    }
+    Ok(())
 }
 
 /// Get the project authority from the first address protocol.
@@ -212,10 +167,10 @@ async fn get_project(
                     let p = ProjectLookup::from_project(c).await?;
                     Ok((Some(p), a))
                 } else {
-                    Err(anyhow!("missing authority in project {:?}", &*proj).into())
+                    Err(miette!("missing authority in project {:?}", &*proj).into())
                 }
             } else {
-                Err(anyhow!("unknown project {}", &*proj).into())
+                Err(miette!("unknown project {}", &*proj).into())
             };
         }
     }

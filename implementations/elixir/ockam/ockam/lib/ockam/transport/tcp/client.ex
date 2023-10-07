@@ -13,7 +13,7 @@ defmodule Ockam.Transport.TCP.Client do
   @impl true
   def address_prefix(_options), do: "TCP_C_"
 
-  ## Override default create in order to alway set restart_type: :temporary
+  ## Override default create in order to always set restart_type: :temporary
   def create(options, timeout) when is_list(options) do
     options = Keyword.put(options, :restart_type, :temporary)
     Ockam.Worker.create(__MODULE__, options, timeout)
@@ -23,6 +23,7 @@ defmodule Ockam.Transport.TCP.Client do
   def setup(options, state) do
     with {:ok, {host, port}} <- get_destination(options) do
       heartbeat = Keyword.get(options, :heartbeat)
+      tcp_wrapper = Keyword.get(options, :tcp_wrapper, Ockam.Transport.TCP.DefaultWrapper)
 
       {protocol, inet_address} =
         case host do
@@ -55,7 +56,8 @@ defmodule Ockam.Transport.TCP.Client do
               socket: socket,
               inet_address: inet_address,
               port: port,
-              heartbeat: heartbeat
+              heartbeat: heartbeat,
+              tcp_wrapper: tcp_wrapper
             })
 
           schedule_heartbeat(state)
@@ -171,7 +173,7 @@ defmodule Ockam.Transport.TCP.Client do
     end
   end
 
-  defp send_over_tcp(data, %{socket: socket}) do
-    :gen_tcp.send(socket, data)
+  defp send_over_tcp(data, %{tcp_wrapper: tcp_wrapper, socket: socket}) do
+    tcp_wrapper.wrap_tcp_call(:gen_tcp, :send, [socket, data])
   end
 end

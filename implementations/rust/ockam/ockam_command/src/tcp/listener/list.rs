@@ -1,17 +1,27 @@
 use clap::Args;
-use cli_table::{print_stdout, Cell, Style, Table};
+use colorful::Colorful;
+use miette::miette;
+use tokio::sync::Mutex;
+use tokio::try_join;
+
 use ockam::Context;
-use ockam_api::nodes::models::transport::{TransportList, TransportStatus};
+use ockam_api::cli_state::StateDirTrait;
+use ockam_api::nodes::models::transport::TransportList;
+use ockam_api::nodes::BackgroundNode;
 
 use crate::node::{get_node_name, initialize_node_if_default, NodeOpts};
-use crate::util::{api, node_rpc, Rpc};
+use crate::terminal::OckamColor;
+use crate::util::{api, node_rpc, parse_node_name};
 use crate::{docs, CommandGlobalOpts};
 
+const PREVIEW_TAG: &str = include_str!("../../static/preview_tag.txt");
 const AFTER_LONG_HELP: &str = include_str!("./static/list/after_long_help.txt");
 
 /// List TCP listeners
 #[derive(Args, Clone, Debug)]
-#[command(after_long_help = docs::after_help(AFTER_LONG_HELP))]
+#[command(
+before_help = docs::before_help(PREVIEW_TAG),
+after_long_help = docs::after_help(AFTER_LONG_HELP))]
 pub struct ListCommand {
     #[command(flatten)]
     node_opts: NodeOpts,
@@ -24,60 +34,50 @@ impl ListCommand {
     }
 }
 
-async fn rpc(mut ctx: Context, (opts, cmd): (CommandGlobalOpts, ListCommand)) -> crate::Result<()> {
-    run_impl(&mut ctx, opts, cmd).await
+async fn rpc(ctx: Context, (opts, cmd): (CommandGlobalOpts, ListCommand)) -> miette::Result<()> {
+    run_impl(&ctx, opts, cmd).await
 }
 
-async fn run_impl(
-    ctx: &mut Context,
-    opts: CommandGlobalOpts,
-    cmd: ListCommand,
-) -> crate::Result<()> {
+async fn run_impl(ctx: &Context, opts: CommandGlobalOpts, cmd: ListCommand) -> miette::Result<()> {
     let node_name = get_node_name(&opts.state, &cmd.node_opts.at_node);
-    let mut rpc = Rpc::background(ctx, &opts, &node_name)?;
-    rpc.request(api::list_tcp_listeners()).await?;
-    let res = rpc.parse_response::<TransportList>()?;
+    let node_name = parse_node_name(&node_name)?;
 
-    list_listeners(&res.list).await?;
+    if !opts.state.nodes.get(&node_name)?.is_running() {
+        return Err(miette!("The node '{}' is not running", node_name));
+    }
 
-    Ok(())
-}
+    let node = BackgroundNode::create(ctx, &opts.state, &node_name).await?;
+    let is_finished: Mutex<bool> = Mutex::new(false);
 
-pub async fn list_listeners(list: &[TransportStatus]) -> crate::Result<()> {
-    let table = list
-        .iter()
-        .fold(
-            vec![],
-            |mut acc,
-             TransportStatus {
-                 tt,
-                 tm,
-                 socket_addr,
-                 processor_address,
-                 flow_control_id,
-                 ..
-             }| {
-                let row = vec![
-                    tt.cell(),
-                    tm.cell(),
-                    socket_addr.cell(),
-                    processor_address.cell(),
-                    flow_control_id.cell(),
-                ];
-                acc.push(row);
-                acc
-            },
-        )
-        .table()
-        .title(vec![
-            "Type".cell().bold(true),
-            "Mode".cell().bold(true),
-            "Address bind".cell().bold(true),
-            "Worker address".cell().bold(true),
-            "Flow Control Id".cell().bold(true),
-        ]);
+    let get_transports = async {
+        let transports: TransportList = node.ask(ctx, api::list_tcp_listeners()).await?;
+        *is_finished.lock().await = true;
+        Ok(transports)
+    };
 
-    print_stdout(table)?;
+    let output_messages = vec![format!(
+        "Listing TCP Listeners on {}...\n",
+        node_name
+            .to_string()
+            .color(OckamColor::PrimaryResource.color())
+    )];
 
+    let progress_output = opts
+        .terminal
+        .progress_output(&output_messages, &is_finished);
+
+    let (transports, _) = try_join!(get_transports, progress_output)?;
+
+    let list = opts.terminal.build_list(
+        &transports.list,
+        &format!("TCP Listeners on {}", node_name),
+        &format!(
+            "No TCP Listeners found on {}",
+            node_name
+                .to_string()
+                .color(OckamColor::PrimaryResource.color())
+        ),
+    )?;
+    opts.terminal.stdout().plain(list).write_line()?;
     Ok(())
 }

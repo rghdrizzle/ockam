@@ -1,19 +1,23 @@
 use clap::Args;
 
-use crate::node::{get_node_name, initialize_node_if_default, NodeOpts};
-use crate::util::extract_address_value;
 use ockam::Context;
-use ockam_api::nodes::models;
+use ockam_api::address::extract_address_value;
+use ockam_api::nodes::models::transport::TransportStatus;
+use ockam_api::nodes::BackgroundNode;
 use ockam_core::api::Request;
 
-use crate::util::{node_rpc, Rpc};
+use crate::node::{get_node_name, initialize_node_if_default, NodeOpts};
+use crate::util::node_rpc;
 use crate::{docs, CommandGlobalOpts};
 
+const PREVIEW_TAG: &str = include_str!("../../static/preview_tag.txt");
 const AFTER_LONG_HELP: &str = include_str!("./static/show/after_long_help.txt");
 
 /// Show a TCP listener
 #[derive(Clone, Debug, Args)]
-#[command(after_long_help = docs::after_help(AFTER_LONG_HELP))]
+#[command(
+before_help = docs::before_help(PREVIEW_TAG),
+after_long_help = docs::after_help(AFTER_LONG_HELP))]
 pub struct ShowCommand {
     #[command(flatten)]
     pub node_opts: NodeOpts,
@@ -32,20 +36,23 @@ impl ShowCommand {
 async fn run_impl(
     ctx: Context,
     (opts, cmd): (CommandGlobalOpts, ShowCommand),
-) -> crate::Result<()> {
+) -> miette::Result<()> {
     let node_name = get_node_name(&opts.state, &cmd.node_opts.at_node);
-    let node = extract_address_value(&node_name)?;
-    let mut rpc = Rpc::background(&ctx, &opts, &node)?;
-    rpc.request(Request::get(format!("/node/tcp/listener/{}", &cmd.address)))
+    let node_name = extract_address_value(&node_name)?;
+    let node = BackgroundNode::create(&ctx, &opts.state, &node_name).await?;
+    let transport_status: TransportStatus = node
+        .ask(
+            &ctx,
+            Request::get(format!("/node/tcp/listener/{}", &cmd.address)),
+        )
         .await?;
-    let res = rpc.parse_response::<models::transport::TransportStatus>()?;
 
     println!("TCP Listener:");
-    println!("  Type: {}", res.tt);
-    println!("  Mode: {}", res.tm);
-    println!("  Socket address: {}", res.socket_addr);
-    println!("  Worker address: {}", res.processor_address);
-    println!("  Flow Control Id: {}", res.flow_control_id);
+    println!("  Type: {}", transport_status.tt);
+    println!("  Mode: {}", transport_status.tm);
+    println!("  Socket address: {}", transport_status.socket_addr);
+    println!("  Worker address: {}", transport_status.processor_address);
+    println!("  Flow Control Id: {}", transport_status.flow_control_id);
 
     Ok(())
 }

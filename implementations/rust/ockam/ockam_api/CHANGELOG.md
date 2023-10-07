@@ -4,6 +4,175 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## 0.40.0 - 2023-10-07
+
+### Changed
+
+- Make `Timestamp` arithmetic operations usage safer
+- Cli's `random_name` function now returns human-readable two-word strings like 'fit-lark'
+- Move the controller address to the node manager
+- Use better names for request / response headers
+- Introduce a secure client for the controller
+- Use controller, authority and project nodes
+- Simplify connections
+- Introduce a supervised node manager to support connection replacements
+- Adjust the code after rebase
+- Move the in memory node to the ockam api crate
+- Package all reply / response methods into a client
+- Use the client in the background node
+- Put back the is_rust check to create forwarders
+- Rename forwarder to relay
+- Updated dependencies
+
+### Fixed
+
+- Fix the sending of messages
+- Fix the code after rebasing
+- Drop the in memory node and delete its node manager
+
+### Removed
+
+- Remove an unused method
+- Remove the need to keep a flag to skip defaults
+- Remove two parameters from requests to the controller
+- Remove the unused tag feature
+- Remove the unused rpc proxy service
+- Remove the supervised node manager
+- Remove the secure clients struct
+
+## 0.39.0 - 2023-10-05
+
+### Changed
+
+- Make `Timestamp` arithmetic operations usage safer
+- Cli's `random_name` function now returns human-readable two-word strings like 'fit-lark'
+- Move the controller address to the node manager
+- Use better names for request / response headers
+- Introduce a secure client for the controller
+- Use controller, authority and project nodes
+- Simplify connections
+- Introduce a supervised node manager to support connection replacements
+- Adjust the code after rebase
+- Move the in memory node to the ockam api crate
+- Package all reply / response methods into a client
+- Use the client in the background node
+- Put back the is_rust check to create forwarders
+- Rename forwarder to relay
+- Updated dependencies
+
+### Fixed
+
+- Fix the sending of messages
+- Fix the code after rebasing
+
+### Removed
+
+- Remove an unused method
+- Remove the need to keep a flag to skip defaults
+- Remove two parameters from requests to the controller
+- Remove the unused tag feature
+- Remove the unused rpc proxy service
+- Remove the supervised node manager
+- Remove the secure clients struct
+
+## 0.38.0 - 2023-09-28
+
+### Added
+
+- Add authority tests
+
+### Changed
+
+- Move authority node code level above in `ockam_api`
+- Break up authenticator
+- Updated dependencies
+
+### Fixed
+
+- Reset cli state if it can't be parsed
+
+### Removed
+
+- Remove scopes for authority members
+
+## 0.37.0 - 2023-09-23
+
+### Changed
+
+- Switch to new `Identity` design
+- Adapt to new identity design
+- Updated dependencies
+
+## 0.36.0 - 2023-09-22
+
+### Changed
+
+- Switch to new `Identity` design
+- Adapt to new identity design
+- Updated dependencies
+
+## 0.35.0 - 2023-09-13
+
+### Changed
+
+- Updated dependencies
+
+## 0.34.0 - 2023-09-06
+
+### Added
+
+- Added a direct local kafka for simple deployments and fixed service registry
+
+### Changed
+
+- Improve tcp disconnect api
+- Use proper url data type
+- Create a relay to the default project after enrolling and when starting the app
+- Move common code to `api` so we can remove `command` from `app`
+- Updated dependencies
+
+### Fixed
+
+- Fix the cbor annotations for non-borrowed data
+
+### Removed
+
+- Removed api lifetimes to access node manager operations directly
+- Remove the `projects` field from `NodeManager` to load them from the `CliState`
+
+## 0.33.0 - 2023-06-26
+
+### Added
+
+- Add more meaningful error messages for `CLiState` errors
+
+### Changed
+
+- Improve type safety for `FlowControls`
+- Hide `Spawner` vs `Producer` logic under the hood
+- Replace `crate::Result` with `miette::Result` as the main result type on command
+- Update ockam api services error responses to using a struct
+- Updated dependencies
+
+## 0.32.0 - 2023-06-09
+
+### Added
+
+- Add more information about which processes use which files
+- Add delete and list subcommands for kafka consumer/producer commands
+
+### Changed
+
+- Document the layout of files for a node
+- Extend direct authenticator service to list and delete members
+- Make `AccessControl` optional while starting a `Worker`
+- Full local kafka implementation which credential validation and flow control
+- Updated dependencies
+
+### Removed
+
+- Remove old config.json file and add migration
+
 ## 0.31.0 - 2023-05-26
 
 ### Added
@@ -193,7 +362,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - Fixes broken tests for macos, let the os choose available ports
 - Reorganize bats tests to run them in parallel
-- 'ockam enroll' ovewrites current configuration instead of returning error
+- 'ockam enroll' overwrites current configuration instead of returning error
 - Update cli_state test with credentials entry
 
 ## 0.24.0 - 2023-02-24
@@ -207,7 +376,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Pre-trusted identity identifiers attributes
 - Use credential instead of credentials
 - Usable kafka sidecar implementation
-- Standarize where authority stores membership information
+- Standardize where authority stores membership information
 - Implemented kafka message encryption and orchestrator integration
 - Bump aws-sdk-kms to 0.24.0 and aws-config to 0.54.1
 - Split cddl schema files & merge when cbor api validation is needed

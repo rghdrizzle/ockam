@@ -1,6 +1,6 @@
 [package]
 name = "ockam_vault_aws"
-version = "0.2.0"
+version = "0.11.0"
 authors = ["Ockam Developers"]
 categories = [
   "cryptography",
@@ -50,20 +50,23 @@ no_std = [
 # Feature: "alloc" enables support for heap allocation (implied by `feature = "std"`)
 alloc = ["ockam_core/alloc", "ockam_node/alloc", "ockam_vault/alloc"]
 
+# Feature: "credentials-sso" enables support for sso on aws-config
+credentials-sso = ["aws-config/credentials-sso"]
+
 [dependencies]
-aws-config = { version = "0.55.3", default-features = false, features = ["native-tls"] }
-aws-sdk-kms = { version = "0.28.0", default-features = false, features = ["native-tls"] }
-delegate = "0.9.0"
-ockam_core = { path = "../ockam_core", version = "^0.81.0", default_features = false }
-ockam_macros = { path = "../ockam_macros", version = "^0.30.0", default-features = false }
-ockam_node = { path = "../ockam_node", version = "^0.84.0", default_features = false }
-ockam_vault = { path = "../ockam_vault", version = "^0.77.0", default_features = false }
+aws-config = { version = "0.56.1", default-features = false, features = ["rustls"] }
+aws-sdk-kms = { version = "0.32.0", default-features = false, features = ["rustls"] }
+delegate = "0.10.0"
+ockam_core = { path = "../ockam_core", version = "^0.88.0", default_features = false }
+ockam_macros = { path = "../ockam_macros", version = "^0.31.0", default-features = false }
+ockam_node = { path = "../ockam_node", version = "^0.93.0", default_features = false }
+ockam_vault = { path = "../ockam_vault", version = "^0.86.0", default_features = false }
 p256 = { version = "0.13.2", default_features = false }
 sha2 = { version = "0.10", default-features = false }
-thiserror = { version = "1.0.38" }
+thiserror = { version = "1.0.49" }
 tracing = { version = "0.1", default-features = false, features = ["attributes"] }
 
 [dev-dependencies]
-aws-credential-types = { version = "0.55.2", default-features = false, features = ["test-util"] }
+aws-credential-types = { version = "0.56.0", default-features = false, features = ["test-util"] }
 hex = { version = "0.4", default-features = false }
-tokio = { version = "1.28", features = ["full"] }
+tokio = { version = "1.31", features = ["full"] }

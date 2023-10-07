@@ -9,8 +9,6 @@ use kafka_protocol::records::{
     Compression, RecordBatchDecoder, RecordBatchEncoder, RecordEncodeOptions,
 };
 use minicbor::encode::Encoder;
-#[cfg(feature = "tag")]
-use ockam_core::TypeTag;
 use ockam_node::Context;
 use std::convert::TryFrom;
 use std::io::{Error, ErrorKind};
@@ -18,12 +16,12 @@ use tracing::warn;
 
 use crate::kafka::portal_worker::InterceptError;
 use crate::kafka::protocol_aware::utils::{decode_body, encode_request};
-use crate::kafka::protocol_aware::{Interceptor, MessageWrapper, RequestInfo};
+use crate::kafka::protocol_aware::{InletInterceptorImpl, MessageWrapper, RequestInfo};
 
-impl Interceptor {
+impl InletInterceptorImpl {
     ///Parse request and map request <=> response
     /// fails if anything in the parsing fails to avoid leaking clear text payloads
-    pub(crate) async fn intercept_request(
+    pub(crate) async fn intercept_request_impl(
         &self,
         context: &mut Context,
         mut original: BytesMut,
@@ -110,7 +108,7 @@ impl Interceptor {
         let request: FetchRequest = decode_body(buffer, header.request_api_version)?;
 
         //we intercept every partition interested by the kafka client
-        //and create a forwarder for each
+        //and create a relay for each
         for topic in &request.topics {
             let topic_id = if header.request_api_version <= 12 {
                 topic.topic.0.to_string()
@@ -137,7 +135,7 @@ impl Interceptor {
                 .collect();
 
             self.secure_channel_controller
-                .start_forwarders_for(context, &topic_id, partitions)
+                .start_relays_for(context, &topic_id, partitions)
                 .await
                 .map_err(InterceptError::Ockam)?
         }
@@ -186,9 +184,8 @@ impl Interceptor {
                             //TODO: to target multiple consumers we could duplicate
                             // the content with a dedicated encryption for each consumer
                             let wrapper = MessageWrapper {
-                                #[cfg(feature = "tag")]
-                                tag: TypeTag,
-                                secure_channel_identifier: encrypted_content.secure_channel_id,
+                                consumer_decryptor_address: encrypted_content
+                                    .consumer_decryptor_address,
                                 content: encrypted_content.content,
                             };
 

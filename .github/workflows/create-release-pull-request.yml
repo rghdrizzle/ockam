@@ -54,7 +54,7 @@ jobs:
       image: ghcr.io/build-trust/ockam-builder@sha256:b7790a79e5fd4265d8333bb882010e5d4326778f270bd49693fa35763865df82
     steps:
       - name: Checkout Ockam
-        uses: actions/checkout@8e5e7e5ab8b370d6c329ec480221332ada57f0ab
+        uses: actions/checkout@8ade135a41bc03ea155e62e844d188df1ea18608
         with:
           fetch-depth: 0
 
@@ -87,7 +87,7 @@ jobs:
         run: bash -ex ./tools/scripts/release/changelog.sh
 
       - name: Update Readme
-        run: cd implementations/rust && ../../gradlew update_readmes
+        run: make -f implementations/rust/Makefile update_readmes
 
       - name: Push Update
         run: |

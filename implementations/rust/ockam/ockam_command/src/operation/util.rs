@@ -1,21 +1,19 @@
-use anyhow::anyhow;
+use miette::miette;
 use tokio_retry::strategy::FixedInterval;
 use tokio_retry::Retry;
 
-use ockam_api::cloud::operation::Operation;
-use ockam_api::cloud::ORCHESTRATOR_AWAIT_TIMEOUT_MS;
+use ockam_api::cloud::operation::Operations;
+use ockam_api::cloud::{Controller, ORCHESTRATOR_AWAIT_TIMEOUT_MS};
+use ockam_node::Context;
 
-use crate::util::api::CloudOpts;
-use crate::util::{api, RpcBuilder};
-use crate::{CommandGlobalOpts, Result};
+use crate::CommandGlobalOpts;
 
-pub async fn check_for_completion<'a>(
-    ctx: &ockam::Context,
+pub async fn check_for_completion(
     opts: &CommandGlobalOpts,
-    cloud_opts: &CloudOpts,
-    api_node: &str,
+    ctx: &Context,
+    controller: &Controller,
     operation_id: &str,
-) -> Result<()> {
+) -> miette::Result<()> {
     let retry_strategy =
         FixedInterval::from_millis(5000).take(ORCHESTRATOR_AWAIT_TIMEOUT_MS / 5000);
 
@@ -23,23 +21,15 @@ pub async fn check_for_completion<'a>(
     if let Some(spinner) = spinner_option.as_ref() {
         spinner.set_message("Configuring project...");
     }
-
     let operation = Retry::spawn(retry_strategy.clone(), || async {
-        let mut rpc = RpcBuilder::new(ctx, opts, api_node).build();
-
         // Handle the operation show request result
         // so we can provide better errors in the case orchestrator does not respond timely
-        if rpc
-            .request(api::operation::show(operation_id, &cloud_opts.route()))
-            .await
-            .is_ok()
-        {
-            let operation = rpc.parse_response::<Operation>()?;
-            if operation.is_completed() {
-                return Ok(operation.to_owned());
-            }
+        let result = controller.get_operation(ctx, operation_id).await?;
+
+        match result {
+            Some(o) if o.is_completed() => Ok(o),
+            _ => Err(miette!("Operation timed out. Please try again.")),
         }
-        Err(anyhow!("Operation timed out. Please try again."))
     })
     .await?;
 
@@ -50,6 +40,6 @@ pub async fn check_for_completion<'a>(
     if operation.is_successful() {
         Ok(())
     } else {
-        Err(anyhow!("Operation failed. Please try again.").into())
+        Err(miette!("Operation failed. Please try again."))
     }
 }

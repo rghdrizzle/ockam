@@ -4,6 +4,65 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## 0.82.0 - 2023-10-07
+
+### Changed
+
+- Updated dependencies
+
+## 0.81.0 - 2023-10-05
+
+### Changed
+
+- Updated dependencies
+
+## 0.80.0 - 2023-09-28
+
+### Changed
+
+- Updated dependencies
+
+### Fixed
+
+- Tungstenite 0.20.0 -> 0.20.1 bump related changes
+
+## 0.79.0 - 2023-09-23
+
+### Changed
+
+- Updated dependencies
+
+## 0.78.0 - 2023-09-22
+
+### Changed
+
+- Updated dependencies
+
+## 0.77.0 - 2023-09-13
+
+### Changed
+
+- Updated dependencies
+
+## 0.76.0 - 2023-09-06
+
+### Changed
+
+- Updated dependencies
+
+## 0.75.0 - 2023-06-26
+
+### Changed
+
+- Updated dependencies
+
+## 0.74.0 - 2023-06-09
+
+### Changed
+
+- Make `AccessControl` optional while starting a `Worker`
+- Updated dependencies
+
 ## 0.73.0 - 2023-05-26
 
 ### Changed

@@ -1,14 +1,15 @@
 use clap::Args;
 use ockam::Context;
-use ockam_api::cloud::space::Space;
+use ockam_api::cloud::space::Spaces;
 use rand::prelude::random;
 
-use crate::node::util::delete_embedded_node;
-use crate::util::api::{self, CloudOpts};
-use crate::util::{node_rpc, Rpc};
+use crate::util::api::{self};
+use crate::util::{is_enrolled_guard, node_rpc};
 use crate::{docs, CommandGlobalOpts};
 use colorful::Colorful;
 use ockam_api::cli_state::{SpaceConfig, StateDirTrait};
+
+use ockam_api::nodes::InMemoryNode;
 
 const LONG_ABOUT: &str = include_str!("./static/create/long_about.txt");
 const AFTER_LONG_HELP: &str = include_str!("./static/create/after_long_help.txt");
@@ -21,11 +22,8 @@ const AFTER_LONG_HELP: &str = include_str!("./static/create/after_long_help.txt"
 )]
 pub struct CreateCommand {
     /// Name of the space - must be unique across all Ockam Orchestrator users.
-    #[arg(display_order = 1001, default_value_t = hex::encode(&random::<[u8;4]>()), hide_default_value = true, value_parser = validate_space_name)]
+    #[arg(display_order = 1001, value_name = "SPACE_NAME", default_value_t = hex::encode(&random::<[u8;4]>()), hide_default_value = true, value_parser = validate_space_name)]
     pub name: String,
-
-    #[command(flatten)]
-    pub cloud_opts: CloudOpts,
 
     /// Administrators for this space
     #[arg(display_order = 1100, last = true)]
@@ -34,38 +32,39 @@ pub struct CreateCommand {
 
 impl CreateCommand {
     pub fn run(self, options: CommandGlobalOpts) {
-        println!(
-            "\n{}",
-            "Creating a trial space for you (everything in it will be deleted in 15 days) ..."
-                .light_magenta()
-        );
-        println!(
-            "{}",
-            "To learn more about production ready spaces in Ockam Orchestrator, contact us at: hello@ockam.io".light_magenta()
-        );
         node_rpc(rpc, (options, self));
     }
 }
 
-async fn rpc(
-    mut ctx: Context,
-    (opts, cmd): (CommandGlobalOpts, CreateCommand),
-) -> crate::Result<()> {
-    run_impl(&mut ctx, opts, cmd).await
+async fn rpc(ctx: Context, (opts, cmd): (CommandGlobalOpts, CreateCommand)) -> miette::Result<()> {
+    run_impl(&ctx, opts, cmd).await
 }
 
 async fn run_impl(
-    ctx: &mut Context,
+    ctx: &Context,
     opts: CommandGlobalOpts,
     cmd: CreateCommand,
-) -> crate::Result<()> {
-    let mut rpc = Rpc::embedded(ctx, &opts).await?;
-    rpc.request(api::space::create(&cmd)).await?;
-    let space = rpc.parse_and_print_response::<Space>()?;
+) -> miette::Result<()> {
+    is_enrolled_guard(&opts.state, None)?;
+
+    opts.terminal.write_line(format!(
+        "\n{}",
+        "Creating a trial space for you (everything in it will be deleted in 15 days) ..."
+            .light_magenta(),
+    ))?;
+    opts.terminal.write_line(format!(
+        "{}",
+        "To learn more about production ready spaces in Ockam Orchestrator, contact us at: hello@ockam.io".light_magenta()
+    ))?;
+
+    let node = InMemoryNode::start(ctx, &opts.state).await?;
+    let controller = node.create_controller().await?;
+    let space = controller.create_space(ctx, cmd.name, cmd.admins).await?;
+
+    opts.println(&space)?;
     opts.state
         .spaces
         .overwrite(&space.name, SpaceConfig::from(&space))?;
-    delete_embedded_node(&opts, rpc.node_name()).await;
     Ok(())
 }
 

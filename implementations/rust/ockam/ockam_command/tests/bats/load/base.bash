@@ -1,5 +1,11 @@
 #!/bin/bash
 
+# Unset OCKAM_LOG so it doesn't interfere in the CLI input/output
+unset OCKAM_LOG
+
+# Set QUIET to 1 to suppress user-facing logging written at stderr
+export QUIET=1
+
 # Ockam binary to use
 if [[ -z $OCKAM ]]; then
   export OCKAM=ockam
@@ -32,14 +38,12 @@ setup_python_server() {
   if [[ ! -f "$p" ]]; then
     mkdir -p "${p%/*}" && touch "$p"
     pushd "$(mktemp -d 2>/dev/null || mktemp -d -t 'tmpdir')" &>/dev/null || {
-      echo "pushd failed"
       exit 1
     }
     python3 -m http.server --bind 127.0.0.1 5000 &
     pid="$!"
     echo "$pid" >"$p"
     popd || {
-      echo "popd failed"
       exit 1
     }
   fi
@@ -82,8 +86,8 @@ teardown_home_dir() {
       echo "Failed test dir: $OCKAM_HOME" >&3
       cp -a "$OCKAM_HOME" "$HOME/.bats-tests"
     fi
-    $OCKAM node delete --all --force
-    $OCKAM reset -y
+    run $OCKAM node delete --all --force --yes
+    run $OCKAM reset -y
   done
 }
 
@@ -93,12 +97,38 @@ to_uppercase() {
 
 # Returns a random name
 random_str() {
-  echo "$(openssl rand -hex 8)"
+  echo "$(openssl rand -hex 4)"
 }
 
 # Returns a random port in the range 49152-65535
 random_port() {
-  shuf -i 49152-65535 -n 1
+  port=0
+  max_retries=10
+  i=0
+  while [[ $i -lt $max_retries ]]; do
+    port=$(shuf -i 10000-65535 -n 1)
+    netstat -latn -p tcp | grep $port >/dev/null
+    if [[ $? == 1 ]]; then
+      break
+    fi
+    ((i++))
+    continue
+  done
+  if [ $i -eq $max_retries ]; then
+    echo "Failed to find an open port" >&3
+    exit 1
+  fi
+  echo "$port"
+}
+
+run_success() {
+  run "$@"
+  assert_success
+}
+
+run_failure() {
+  run "$@"
+  assert_failure
 }
 
 bats_require_minimum_version 1.5.0

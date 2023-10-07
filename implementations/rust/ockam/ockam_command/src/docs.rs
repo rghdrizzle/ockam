@@ -17,12 +17,14 @@ const FOOTER: &str = "
 Learn More:
 
 Use 'ockam <SUBCOMMAND> --help' for more information about a subcommand.
-Learn more at https://docs.ockam.io/reference/command
+Where <SUBCOMMAND> might be: 'node', 'status', 'enroll', etc.
+Learn more about Command: https://command.ockam.io/manual/
+Learn more about Ockam: https://docs.ockam.io/reference/command
 
 Feedback:
 
-If you have any questions or feedback, please start a discussion
-on Github https://github.com/build-trust/ockam/discussions/new
+If you have questions, as you explore, join us on the contributors
+discord channel https://discord.gg/bewvnm6zqS
 ";
 
 static SYNTAX_SET: Lazy<SyntaxSet> = Lazy::new(SyntaxSet::load_defaults_newlines);
@@ -46,26 +48,31 @@ pub(crate) fn hide() -> bool {
     get_env_with_default("OCKAM_HELP_SHOW_HIDDEN", true).unwrap_or(true)
 }
 
-pub(crate) fn about(body: &str) -> &'static str {
-    render(body)
+pub(crate) fn about(text: &str) -> &'static str {
+    render(text)
 }
 
-#[allow(unused)]
-pub(crate) fn before_help(body: &str) -> &'static str {
-    render(body)
-}
-
-pub(crate) fn after_help(body: &str) -> &'static str {
-    let mut after_help = String::new();
+pub(crate) fn before_help(text: &str) -> &'static str {
+    let mut processed = String::new();
     if is_markdown() {
-        after_help.push_str("### Examples\n\n");
-        after_help.push_str(body);
+        processed.push_str(&enrich_preview_tag(text));
     } else {
-        after_help.push_str("Examples:\n\n");
-        after_help.push_str(body);
-        after_help.push_str(FOOTER);
+        processed.push_str(text);
     }
-    render(after_help.as_str())
+    render(processed.as_str())
+}
+
+pub(crate) fn after_help(text: &str) -> &'static str {
+    let mut processed = String::new();
+    if is_markdown() {
+        processed.push_str("### Examples\n\n");
+        processed.push_str(text);
+    } else {
+        processed.push_str("Examples:\n\n");
+        processed.push_str(text);
+        processed.push_str(FOOTER);
+    }
+    render(processed.as_str())
 }
 
 /// Render the string if the document should be displayed in a terminal
@@ -166,4 +173,19 @@ fn to_bold_and_underline(mut b: String, s: &str) -> String {
     buffer.reset().expect(err_msg);
     buffer.as_slice().read_to_string(&mut b).expect(err_msg);
     b
+}
+
+const PREVIEW_TOOLTIP_TEXT: &str = include_str!("./static/preview_tooltip.txt");
+
+/// Enrich the `[Preview]` tag with html
+fn enrich_preview_tag(text: &str) -> String {
+    // Converts [Preview] to <div class="chip t">Preview<div class="tt">..</div></div>
+    let mut tooltip = String::new();
+    for line in PREVIEW_TOOLTIP_TEXT.trim_end().lines() {
+        tooltip.push_str(&format!("<p>{}</p>", line));
+    }
+    tooltip = format!("<div class=\"tt\">{tooltip}</div>");
+    let preview = "<b>Preview</b>";
+    let container = format!("<div class=\"chip t\">{}{}</div>", preview, tooltip);
+    text.replace("[Preview]", &container)
 }

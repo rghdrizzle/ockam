@@ -35,7 +35,7 @@ updates:
       - "Type: Dependencies"
       - "Implementation: Typescript"
 
-  # Maintain dependencies for elixir ockam application
+# Maintain dependencies for elixir ockam application
   - package-ecosystem: "mix"
     directory: "/implementations/elixir/ockam/ockam"
     commit-message:
@@ -93,17 +93,6 @@ updates:
   # Maintain dependencies for elixir ockam_kafka application
   - package-ecosystem: "mix"
     directory: "/implementations/elixir/ockam/ockam_kafka"
-    commit-message:
-      prefix: "build:"
-    schedule:
-      interval: "daily"
-    labels:
-      - "Type: Dependencies"
-      - "Implementation: Elixir"
-
-  # Maintain dependencies for elixir ockam_vault_software application
-  - package-ecosystem: "mix"
-    directory: "/implementations/elixir/ockam/ockam_vault_software"
     commit-message:
       prefix: "build:"
     schedule:

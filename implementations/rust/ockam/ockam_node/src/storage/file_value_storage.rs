@@ -40,8 +40,8 @@ impl<V: Default + Serialize + for<'de> Deserialize<'de>> FileValueStorage<V> {
 
     /// Create the file storage but don't initialize it
     fn new(path: &Path) -> Self {
-        let temp_path = Self::path_with_suffix(path, ".tmp");
-        let lock_path = Self::path_with_suffix(path, ".lock");
+        let temp_path = Self::path_with_suffix(path, "tmp");
+        let lock_path = Self::path_with_suffix(path, "lock");
         Self {
             path: path.into(),
             temp_path: temp_path.into(),
@@ -53,20 +53,38 @@ impl<V: Default + Serialize + for<'de> Deserialize<'de>> FileValueStorage<V> {
     /// Create FileStorage using file at given Path
     /// If file doesn't exist, it will be created
     async fn init(&mut self) -> Result<()> {
+        std::fs::create_dir_all(self.path.parent().unwrap())
+            .map_err(|e| Error::new(Origin::Node, Kind::Io, e))?;
         // This can block, but only when first initializing and just need to write an empty vault.
         // So didn't bother to do it async
         let lock_file = Self::open_lock_file(&self.lock_path)?;
-        lock_file.lock_exclusive().map_err(map_io_err)?;
-        if !self.path.exists() {
+        lock_file
+            .lock_exclusive()
+            .map_err(|e| map_io_err(&self.lock_path, e))?;
+
+        let should_flush_default = if self.path.exists() {
+            let metadata = self
+                .path
+                .metadata()
+                .map_err(|e| map_io_err(&self.path, e))?;
+
+            metadata.len() == 0
+        } else {
+            true
+        };
+
+        if should_flush_default {
             let empty = V::default();
             Self::flush_to_file(&self.path, &self.temp_path, &empty)?;
         }
-        lock_file.unlock().map_err(map_io_err)?;
+        lock_file
+            .unlock()
+            .map_err(|e| map_io_err(&self.lock_path, e))?;
         Ok(())
     }
 
     fn load(path: &Path) -> Result<V> {
-        let file = File::open(path).map_err(map_io_err)?;
+        let file = File::open(path).map_err(|e| map_io_err(path, e))?;
         let reader = BufReader::new(file);
         Ok(serde_json::from_reader::<BufReader<File>, V>(reader)
             .map_err(|e| ValueStorageError::InvalidStorageData(e.to_string()))?)
@@ -108,7 +126,7 @@ impl<V> FileValueStorage<V> {
     fn path_with_suffix(path: &Path, suffix: &str) -> PathBuf {
         match path.extension() {
             None => path.with_extension(suffix),
-            Some(e) => path.with_extension(format!("{}{}", e.to_str().unwrap(), suffix)),
+            Some(e) => path.with_extension(format!("{}.{}", e.to_str().unwrap(), suffix)),
         }
     }
 
@@ -118,7 +136,7 @@ impl<V> FileValueStorage<V> {
             .read(true)
             .create(true)
             .open(lock_path)
-            .map_err(map_io_err)
+            .map_err(|e| map_io_err(lock_path, e))
     }
 }
 
@@ -141,12 +159,12 @@ impl<V: Default + for<'a> Deserialize<'a> + Serialize + Send + Sync + 'static> V
         let path = self.path.clone();
         let tr = move || -> Result<R> {
             let file = FileValueStorage::<V>::open_lock_file(&lock_path)?;
-            file.lock_exclusive().map_err(map_io_err)?;
+            file.lock_exclusive().map_err(|e| map_io_err(&path, e))?;
             let existing_value = FileValueStorage::<V>::load(&path)?;
             let (updated_value, result) = f(existing_value)?;
             FileValueStorage::<V>::flush_to_file(&path, &temp_path, &updated_value)?;
             // if something goes wrong it will be unlocked once the file handler get closed anyway
-            file.unlock().map_err(map_io_err)?;
+            file.unlock().map_err(|e| map_io_err(&path, e))?;
             Ok(result)
         };
         task::spawn_blocking(tr).await.map_err(map_join_err)?
@@ -160,11 +178,11 @@ impl<V: Default + for<'a> Deserialize<'a> + Serialize + Send + Sync + 'static> V
         let lock_path = self.lock_path.clone();
         let tr = move || {
             let file = FileValueStorage::<V>::open_lock_file(&lock_path)?;
-            file.lock_shared().map_err(map_io_err)?;
+            file.lock_shared().map_err(|e| map_io_err(&path, e))?;
             let data = FileValueStorage::<V>::load(&path)?;
             let r = f(data)?;
             // if something goes wrong it will be unlocked once the file handler get closed anyway
-            file.unlock().map_err(map_io_err)?;
+            file.unlock().map_err(|e| map_io_err(&path, e))?;
             Ok(r)
         };
         task::spawn_blocking(tr).await.map_err(map_join_err)?
@@ -175,8 +193,12 @@ fn map_join_err(err: JoinError) -> Error {
     Error::new(Origin::Application, Kind::Io, err)
 }
 
-fn map_io_err(err: std::io::Error) -> Error {
-    Error::new(Origin::Application, Kind::Io, err)
+fn map_io_err(path: &Path, err: std::io::Error) -> Error {
+    Error::new(
+        Origin::Application,
+        Kind::Io,
+        format!("{err} for path {:?}", path),
+    )
 }
 
 /// Represents the failures that can occur when storing values
@@ -209,15 +231,35 @@ impl From<ValueStorageError> for Error {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::storage::file_key_value_storage::tests::create_temp_file;
+    use ockam_core::compat::rand::{thread_rng, Rng};
     use ockam_core::Result;
+    use tempfile::NamedTempFile;
+
+    #[tokio::test]
+    async fn test_empty_file() -> Result<()> {
+        let path = NamedTempFile::new().unwrap();
+
+        let storage = FileValueStorage::<Value>::create(path.path())
+            .await
+            .unwrap();
+
+        storage.update_value(Ok).await?;
+
+        Ok(())
+    }
 
     #[tokio::test]
     async fn test_file_value_storage() -> Result<()> {
-        let storage: FileValueStorage<Value> =
-            FileValueStorage::create(create_temp_file().as_path())
-                .await
-                .unwrap();
+        let file_name = hex::encode(thread_rng().gen::<[u8; 8]>());
+
+        let path = tempfile::tempdir()
+            .unwrap()
+            .into_path()
+            .with_file_name(file_name);
+
+        let storage = FileValueStorage::<Value>::create(path.as_path())
+            .await
+            .unwrap();
 
         let initial = storage.read_value(Ok).await?;
 

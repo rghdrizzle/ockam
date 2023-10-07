@@ -2,18 +2,12 @@ use clap::builder::NonEmptyStringValueParser;
 use clap::Args;
 
 use ockam::Context;
-use ockam_api::cloud::addon::Addon;
+use ockam_api::cloud::addon::Addons;
+use ockam_api::nodes::InMemoryNode;
 
-use ockam_api::cloud::CloudRequestWrapper;
-use ockam_core::api::Request;
-
-use crate::node::util::delete_embedded_node;
-use crate::project::addon::base_endpoint;
-
-use crate::util::api::CloudOpts;
-
-use crate::util::{node_rpc, Rpc};
-use crate::{CommandGlobalOpts, Result};
+use crate::project::addon::get_project_id;
+use crate::util::node_rpc;
+use crate::CommandGlobalOpts;
 
 /// List available addons for a project
 #[derive(Clone, Debug, Args)]
@@ -29,23 +23,23 @@ pub struct AddonListSubcommand {
 }
 
 impl AddonListSubcommand {
-    pub fn run(self, opts: CommandGlobalOpts, cloud_opts: CloudOpts) {
-        node_rpc(run_impl, (opts, cloud_opts, self));
+    pub fn run(self, opts: CommandGlobalOpts) {
+        node_rpc(run_impl, (opts, self));
     }
 }
 
 async fn run_impl(
     ctx: Context,
-    (opts, cloud_opts, cmd): (CommandGlobalOpts, CloudOpts, AddonListSubcommand),
-) -> Result<()> {
-    let controller_route = &cloud_opts.route();
+    (opts, cmd): (CommandGlobalOpts, AddonListSubcommand),
+) -> miette::Result<()> {
     let project_name = cmd.project_name;
+    let project_id = get_project_id(&opts.state, project_name.as_str())?;
 
-    let mut rpc = Rpc::embedded(&ctx, &opts).await?;
-    let req = Request::get(base_endpoint(&opts.state, &project_name)?)
-        .body(CloudRequestWrapper::bare(controller_route));
-    rpc.request(req).await?;
-    rpc.parse_and_print_response::<Vec<Addon>>()?;
-    delete_embedded_node(&opts, rpc.node_name()).await;
+    let node = InMemoryNode::start(&ctx, &opts.state).await?;
+    let controller = node.create_controller().await?;
+
+    let addons = controller.list_addons(&ctx, project_id).await?;
+
+    opts.println(&addons)?;
     Ok(())
 }

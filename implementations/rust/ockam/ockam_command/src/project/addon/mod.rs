@@ -6,11 +6,15 @@ mod list;
 
 use core::fmt::Write;
 
-use anyhow::Context as _;
 use clap::{Args, Subcommand};
+use miette::Context as _;
 
 use ockam_api::cli_state::{CliState, StateDirTrait, StateItemTrait};
 use ockam_api::cloud::addon::Addon;
+use ockam_api::cloud::project::Projects;
+use ockam_api::nodes::InMemoryNode;
+
+use ockam_node::Context;
 
 use crate::project::addon::configure_confluent::AddonConfigureConfluentSubcommand;
 use crate::project::addon::configure_influxdb::AddonConfigureInfluxdbSubcommand;
@@ -18,9 +22,11 @@ use crate::project::addon::configure_okta::AddonConfigureOktaSubcommand;
 use crate::project::addon::disable::AddonDisableSubcommand;
 use crate::project::addon::list::AddonListSubcommand;
 
+use crate::output::Output;
 use crate::util::api::CloudOpts;
-use crate::util::output::Output;
 
+use crate::operation::util::check_for_completion;
+use crate::project::util::check_project_readiness;
 use crate::{CommandGlobalOpts, Result};
 
 /// Manage addons for a project
@@ -44,9 +50,9 @@ pub enum AddonSubcommand {
 impl AddonCommand {
     pub fn run(self, opts: CommandGlobalOpts) {
         match self.subcommand {
-            AddonSubcommand::List(cmd) => cmd.run(opts, self.cloud_opts),
-            AddonSubcommand::Disable(cmd) => cmd.run(opts, self.cloud_opts),
-            AddonSubcommand::Configure(cmd) => cmd.run(opts, self.cloud_opts),
+            AddonSubcommand::List(cmd) => cmd.run(opts),
+            AddonSubcommand::Disable(cmd) => cmd.run(opts),
+            AddonSubcommand::Configure(cmd) => cmd.run(opts),
         }
     }
 }
@@ -59,16 +65,16 @@ pub enum ConfigureAddonCommand {
 }
 
 impl ConfigureAddonCommand {
-    pub fn run(self, opts: CommandGlobalOpts, cloud_opts: CloudOpts) {
+    pub fn run(self, opts: CommandGlobalOpts) {
         match self {
-            ConfigureAddonCommand::Okta(cmd) => cmd.run(opts, cloud_opts),
-            ConfigureAddonCommand::Influxdb(cmd) => cmd.run(opts, cloud_opts),
-            ConfigureAddonCommand::Confluent(cmd) => cmd.run(opts, cloud_opts),
+            ConfigureAddonCommand::Okta(cmd) => cmd.run(opts),
+            ConfigureAddonCommand::Influxdb(cmd) => cmd.run(opts),
+            ConfigureAddonCommand::Confluent(cmd) => cmd.run(opts),
         }
     }
 }
 
-impl Output for Addon<'_> {
+impl Output for Addon {
     fn output(&self) -> Result<String> {
         let mut w = String::new();
         write!(w, "Addon:")?;
@@ -80,7 +86,7 @@ impl Output for Addon<'_> {
     }
 }
 
-impl Output for Vec<Addon<'_>> {
+impl Output for Vec<Addon> {
     fn output(&self) -> Result<String> {
         if self.is_empty() {
             return Ok("No addons found".to_string());
@@ -97,8 +103,8 @@ impl Output for Vec<Addon<'_>> {
     }
 }
 
-pub fn base_endpoint(cli_state: &CliState, project_name: &str) -> Result<String> {
-    let project_id = cli_state
+pub fn get_project_id(cli_state: &CliState, project_name: &str) -> Result<String> {
+    Ok(cli_state
         .projects
         .get(project_name)
         .context(format!(
@@ -106,32 +112,19 @@ pub fn base_endpoint(cli_state: &CliState, project_name: &str) -> Result<String>
         ))?
         .config()
         .id
-        .clone();
-    Ok(format!("{project_id}/addons"))
+        .clone())
 }
 
-pub fn configure_addon_endpoint(cli_state: &CliState, project_name: &str) -> Result<String> {
-    let project_id = cli_state
-        .projects
-        .get(project_name)
-        .context(format!(
-            "Failed to get project {project_name} from config lookup"
-        ))?
-        .config()
-        .id
-        .clone();
-    Ok(format!("v1/projects/{project_id}/configure_addon"))
-}
-
-pub fn disable_addon_endpoint(cli_state: &CliState, project_name: &str) -> Result<String> {
-    let project_id = cli_state
-        .projects
-        .get(project_name)
-        .context(format!(
-            "Failed to get project {project_name} from config lookup"
-        ))?
-        .config()
-        .id
-        .clone();
-    Ok(format!("v1/projects/{project_id}/disable_addon"))
+async fn check_configuration_completion(
+    opts: &CommandGlobalOpts,
+    ctx: &Context,
+    node: &InMemoryNode,
+    project_id: String,
+    operation_id: String,
+) -> Result<()> {
+    let controller = node.create_controller().await?;
+    check_for_completion(opts, ctx, &controller, &operation_id).await?;
+    let project = controller.get_project(ctx, project_id).await?;
+    let _ = check_project_readiness(opts, ctx, node, project).await?;
+    Ok(())
 }

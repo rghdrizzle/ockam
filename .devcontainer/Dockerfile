@@ -1,1 +1,1 @@
-FROM ghcr.io/build-trust/ockam-builder@sha256:cecb1860acd571278b2e7f8ecb3ffe405447ee844615134f93ddd11b1f3e2ca8
+FROM ghcr.io/build-trust/ockam-builder@sha256:9ee4558d834514e60a50c41bbf38c6ecae47d94dcfaa4df6a7256c262a7b0f4b

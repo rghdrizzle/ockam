@@ -1,24 +1,24 @@
+use crate::cloud::operation::CreateOperationResponse;
+use crate::cloud::project::{InfluxDBTokenLeaseManagerConfig, OktaConfig};
+use crate::cloud::Controller;
+use miette::IntoDiagnostic;
 use minicbor::{Decode, Encode};
+use ockam_core::api::Request;
+use ockam_core::async_trait;
+use ockam_node::Context;
 use serde::{Deserialize, Serialize};
 
-use ockam_core::CowStr;
-#[cfg(feature = "tag")]
-use ockam_core::TypeTag;
+const TARGET: &str = "ockam_api::cloud::addon";
+const API_SERVICE: &str = "projects";
 
 #[derive(Encode, Decode, Serialize, Deserialize, Debug)]
 #[cfg_attr(test, derive(Clone))]
 #[cbor(map)]
-pub struct Addon<'a> {
-    #[cfg(feature = "tag")]
-    #[serde(skip)]
-    #[n(0)]
-    pub tag: TypeTag<1530077>,
-    #[b(1)]
-    #[serde(borrow)]
-    pub id: CowStr<'a>,
-    #[b(2)]
-    #[serde(borrow)]
-    pub description: CowStr<'a>,
+pub struct Addon {
+    #[n(1)]
+    pub id: String,
+    #[n(2)]
+    pub description: String,
     #[n(3)]
     pub enabled: bool,
 }
@@ -26,20 +26,13 @@ pub struct Addon<'a> {
 #[derive(Encode, Decode, Serialize, Deserialize, Debug)]
 #[rustfmt::skip]
 #[cbor(map)]
-pub struct ConfluentConfig<'a> {
-    #[cfg(feature = "tag")]
-    #[serde(skip)]
-    #[cbor(n(0))] pub tag: TypeTag<1697996>,
-
-    #[serde(borrow)]
-    #[cbor(b(1))] pub bootstrap_server: CowStr<'a>,
+pub struct ConfluentConfig {
+    #[cbor(n(1))] pub bootstrap_server: String,
 }
 
-impl<'a> ConfluentConfig<'a> {
-    pub fn new<S: Into<CowStr<'a>>>(bootstrap_server: S) -> Self {
+impl ConfluentConfig {
+    pub fn new<S: Into<String>>(bootstrap_server: S) -> Self {
         Self {
-            #[cfg(feature = "tag")]
-            tag: TypeTag,
             bootstrap_server: bootstrap_server.into(),
         }
     }
@@ -49,19 +42,22 @@ impl<'a> ConfluentConfig<'a> {
 #[rustfmt::skip]
 #[cbor(map)]
 pub struct ConfluentConfigResponse {
-    #[cfg(feature = "tag")]
-    #[serde(skip)]
-    #[cbor(n(0))] pub tag: TypeTag<6434816>,
-
     #[cbor(n(1))] pub bootstrap_server: String,
 }
 
 impl ConfluentConfigResponse {
     pub fn new<S: ToString>(bootstrap_server: S) -> Self {
         Self {
-            #[cfg(feature = "tag")]
-            tag: TypeTag,
             bootstrap_server: bootstrap_server.to_string(),
+        }
+    }
+}
+
+#[cfg(test)]
+impl quickcheck::Arbitrary for ConfluentConfigResponse {
+    fn arbitrary(g: &mut quickcheck::Gen) -> Self {
+        Self {
+            bootstrap_server: String::arbitrary(g),
         }
     }
 }
@@ -69,153 +65,134 @@ impl ConfluentConfigResponse {
 #[derive(Encode, Decode, Serialize, Deserialize, Debug)]
 #[rustfmt::skip]
 #[cbor(map)]
-pub struct DisableAddon<'a> {
-    #[cfg(feature = "tag")]
-    #[serde(skip)]
-    #[cbor(n(0))] pub tag: TypeTag<8677807>,
-
-    #[serde(borrow)]
-    #[cbor(b(1))] pub addon_id: CowStr<'a>,
+pub struct DisableAddon {
+    #[cbor(n(1))] pub addon_id: String,
 }
 
-impl<'a> DisableAddon<'a> {
-    pub fn new<S: Into<CowStr<'a>>>(addon_id: S) -> Self {
+impl DisableAddon {
+    pub fn new<S: Into<String>>(addon_id: S) -> Self {
         Self {
-            #[cfg(feature = "tag")]
-            tag: TypeTag,
             addon_id: addon_id.into(),
         }
     }
 }
 
-mod node {
-    use minicbor::{Decode, Decoder, Encode};
-    use tracing::trace;
+#[async_trait]
+pub trait Addons {
+    async fn list_addons(&self, ctx: &Context, project_id: String) -> miette::Result<Vec<Addon>>;
 
-    use ockam_core::api::Request;
-    use ockam_core::{self, Result};
-    use ockam_node::Context;
+    async fn configure_confluent_addon(
+        &self,
+        ctx: &Context,
+        project_id: String,
+        config: ConfluentConfig,
+    ) -> miette::Result<CreateOperationResponse>;
 
-    use crate::cloud::addon::{ConfluentConfig, DisableAddon};
-    use crate::cloud::project::{InfluxDBTokenLeaseManagerConfig, OktaConfig};
-    use crate::cloud::{BareCloudRequestWrapper, CloudRequestWrapper};
-    use crate::error::ApiError;
-    use crate::nodes::NodeManagerWorker;
+    async fn configure_okta_addon(
+        &self,
+        ctx: &Context,
+        project_id: String,
+        config: OktaConfig,
+    ) -> miette::Result<CreateOperationResponse>;
 
-    const TARGET: &str = "ockam_api::cloud::addon";
-    const API_SERVICE: &str = "projects";
+    async fn configure_influxdb_addon(
+        &self,
+        ctx: &Context,
+        project_id: String,
+        config: InfluxDBTokenLeaseManagerConfig,
+    ) -> miette::Result<CreateOperationResponse>;
 
-    impl NodeManagerWorker {
-        pub(crate) async fn list_addons(
-            &mut self,
-            ctx: &mut Context,
-            dec: &mut Decoder<'_>,
-            project_id: &str,
-        ) -> Result<Vec<u8>> {
-            let req_wrapper: BareCloudRequestWrapper = dec.decode()?;
-            let cloud_multiaddr = req_wrapper.multiaddr()?;
+    async fn disable_addon(
+        &self,
+        ctx: &Context,
+        project_id: String,
+        addon_id: String,
+    ) -> miette::Result<CreateOperationResponse>;
+}
 
-            let label = "list_addons";
-            trace!(target: TARGET, project_id, "listing addons");
-
-            let req_builder = Request::get(format!("/v0/{project_id}/addons"));
-
-            self.request_controller(
-                ctx,
-                label,
-                None,
-                &cloud_multiaddr,
-                API_SERVICE,
-                req_builder,
-                None,
-            )
+#[async_trait]
+impl Addons for Controller {
+    async fn list_addons(&self, ctx: &Context, project_id: String) -> miette::Result<Vec<Addon>> {
+        trace!(target: TARGET, project_id, "listing addons");
+        let req = Request::get(format!("/v0/{project_id}/addons"));
+        self.0
+            .ask(ctx, API_SERVICE, req)
             .await
-        }
+            .into_diagnostic()?
+            .success()
+            .into_diagnostic()
+    }
 
-        pub(crate) async fn configure_addon(
-            &mut self,
-            ctx: &mut Context,
-            dec: &mut Decoder<'_>,
-            project_id: &str,
-            addon_id: &str,
-        ) -> Result<Vec<u8>> {
-            // TODO: Add on ids should not be magic strings
-            match addon_id {
-                "okta" => {
-                    self.configure_addon_impl::<OktaConfig>(ctx, dec, project_id, addon_id)
-                        .await
-                }
-                "influxdb_token_lease_manager" => {
-                    self.configure_addon_impl::<InfluxDBTokenLeaseManagerConfig>(
-                        ctx, dec, project_id, addon_id,
-                    )
-                    .await
-                }
-                "confluent" => {
-                    self.configure_addon_impl::<ConfluentConfig>(ctx, dec, project_id, addon_id)
-                        .await
-                }
-                _ => Err(ApiError::generic(&format!("Unknown addon: {addon_id}"))),
-            }
-        }
-
-        async fn configure_addon_impl<'a, T: Encode<()> + Decode<'a, ()>>(
-            &mut self,
-            ctx: &mut Context,
-            dec: &mut Decoder<'a>,
-            project_id: &str,
-            addon_id: &str,
-        ) -> Result<Vec<u8>> {
-            let label = "configure_addon";
-            trace!(target: TARGET, project_id, addon_id, "configuring addon");
-
-            let req_wrapper: CloudRequestWrapper<T> = dec.decode()?;
-            let cloud_multiaddr = req_wrapper.multiaddr()?;
-            let req_body = req_wrapper.req;
-
-            let req_builder = Request::post(format!(
-                "/v1/projects/{project_id}/configure_addon/{addon_id}"
-            ))
-            .body(req_body);
-
-            self.request_controller(
-                ctx,
-                label,
-                None,
-                &cloud_multiaddr,
-                API_SERVICE,
-                req_builder,
-                None,
-            )
+    async fn configure_confluent_addon(
+        &self,
+        ctx: &Context,
+        project_id: String,
+        config: ConfluentConfig,
+    ) -> miette::Result<CreateOperationResponse> {
+        trace!(target: TARGET, project_id, "configuring confluent addon");
+        let req = Request::post(format!(
+            "/v1/projects/{project_id}/configure_addon/confluent"
+        ))
+        .body(config);
+        self.0
+            .ask(ctx, API_SERVICE, req)
             .await
-        }
+            .into_diagnostic()?
+            .success()
+            .into_diagnostic()
+    }
 
-        pub(crate) async fn disable_addon(
-            &mut self,
-            ctx: &mut Context,
-            dec: &mut Decoder<'_>,
-            project_id: &str,
-        ) -> Result<Vec<u8>> {
-            let label = "disable_addon";
-            trace!(target: TARGET, project_id, "disabling addon");
-
-            let req_wrapper: CloudRequestWrapper<DisableAddon> = dec.decode()?;
-            let cloud_multiaddr = req_wrapper.multiaddr()?;
-            let req_body = req_wrapper.req;
-
-            let req_builder =
-                Request::post(format!("/v1/projects/{project_id}/disable_addon")).body(req_body);
-
-            self.request_controller(
-                ctx,
-                label,
-                None,
-                &cloud_multiaddr,
-                API_SERVICE,
-                req_builder,
-                None,
-            )
+    async fn configure_okta_addon(
+        &self,
+        ctx: &Context,
+        project_id: String,
+        config: OktaConfig,
+    ) -> miette::Result<CreateOperationResponse> {
+        trace!(target: TARGET, project_id, "configuring okta addon");
+        let req =
+            Request::post(format!("/v1/projects/{project_id}/configure_addon/okta")).body(config);
+        self.0
+            .ask(ctx, API_SERVICE, req)
             .await
-        }
+            .into_diagnostic()?
+            .success()
+            .into_diagnostic()
+    }
+
+    async fn configure_influxdb_addon(
+        &self,
+        ctx: &Context,
+        project_id: String,
+        config: InfluxDBTokenLeaseManagerConfig,
+    ) -> miette::Result<CreateOperationResponse> {
+        //
+        trace!(target: TARGET, project_id, "configuring influxdb addon");
+        let req = Request::post(format!(
+            "/v1/projects/{project_id}/configure_addon/influxdb_token_lease_manager"
+        ))
+        .body(config);
+        self.0
+            .ask(ctx, API_SERVICE, req)
+            .await
+            .into_diagnostic()?
+            .success()
+            .into_diagnostic()
+    }
+
+    async fn disable_addon(
+        &self,
+        ctx: &Context,
+        project_id: String,
+        addon_id: String,
+    ) -> miette::Result<CreateOperationResponse> {
+        trace!(target: TARGET, project_id, "disabling addon");
+        let req = Request::post(format!("/v1/projects/{project_id}/disable_addon"))
+            .body(DisableAddon::new(addon_id));
+        self.0
+            .ask(ctx, API_SERVICE, req)
+            .await
+            .into_diagnostic()?
+            .success()
+            .into_diagnostic()
     }
 }

@@ -1,6 +1,7 @@
 use super::Result;
 use crate::cli_state::CliStateError;
-use ockam_identity::{Credential, Identity, IdentityHistoryComparison};
+use ockam::identity::models::CredentialAndPurposeKey;
+use ockam::identity::Identifier;
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
 
@@ -22,40 +23,33 @@ impl CredentialState {
     }
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct CredentialConfig {
-    pub issuer: Identity,
-    pub encoded_credential: String,
+    pub issuer_identifier: Identifier,
+    // FIXME: Appear as array of number in JSON
+    pub encoded_issuer_change_history: Vec<u8>,
+    // FIXME: Appear as array of number in JSON
+    pub encoded_credential: Vec<u8>,
 }
-
-impl PartialEq for CredentialConfig {
-    fn eq(&self, other: &Self) -> bool {
-        self.encoded_credential == other.encoded_credential
-            && self.issuer.compare(&other.issuer) == IdentityHistoryComparison::Equal
-    }
-}
-
-impl Eq for CredentialConfig {}
 
 impl CredentialConfig {
-    pub fn new(issuer: Identity, encoded_credential: String) -> Result<Self> {
+    pub fn new(
+        issuer_identifier: Identifier,
+        encoded_issuer_change_history: Vec<u8>,
+        encoded_credential: Vec<u8>,
+    ) -> Result<Self> {
         Ok(Self {
-            issuer,
+            issuer_identifier,
+            encoded_issuer_change_history,
             encoded_credential,
         })
     }
 
-    pub fn credential(&self) -> Result<Credential> {
-        let bytes = match hex::decode(&self.encoded_credential) {
-            Ok(b) => b,
-            Err(e) => {
-                return Err(CliStateError::Invalid(format!(
-                    "Unable to hex decode credential. {e}"
-                )));
-            }
-        };
-        minicbor::decode::<Credential>(&bytes)
-            .map_err(|e| CliStateError::Invalid(format!("Unable to decode credential. {e}")))
+    pub fn credential(&self) -> Result<CredentialAndPurposeKey> {
+        minicbor::decode(&self.encoded_credential).map_err(|e| {
+            error!(%e, "Unable to decode credential");
+            CliStateError::InvalidOperation("Unable to decode credential".to_string())
+        })
     }
 }
 
@@ -64,6 +58,7 @@ mod traits {
     use crate::cli_state::file_stem;
     use crate::cli_state::traits::*;
     use ockam_core::async_trait;
+    use std::path::Path;
 
     #[async_trait]
     impl StateDirTrait for CredentialsState {
@@ -72,8 +67,10 @@ mod traits {
         const DIR_NAME: &'static str = "credentials";
         const HAS_DATA_DIR: bool = false;
 
-        fn new(dir: PathBuf) -> Self {
-            Self { dir }
+        fn new(root_path: &Path) -> Self {
+            Self {
+                dir: Self::build_dir(root_path),
+            }
         }
 
         fn dir(&self) -> &PathBuf {

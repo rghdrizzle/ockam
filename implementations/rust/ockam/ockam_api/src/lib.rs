@@ -123,6 +123,7 @@
 //! file per vault. A vault contains secrets which are generally used during the creation of secure
 //! channels to sign or encrypt data involved in the handshake.
 //!
+pub mod address;
 pub mod auth;
 pub mod authenticator;
 pub mod bootstrapped_identities_store;
@@ -130,22 +131,26 @@ pub mod cli_state;
 pub mod cloud;
 pub mod config;
 pub mod echoer;
+pub mod enroll;
 pub mod error;
 pub mod hop;
 pub mod identity;
 pub mod kafka;
+pub mod minicbor_url;
 pub mod nodes;
 pub mod okta;
 pub mod port_range;
-pub mod rpc_proxy_service;
+pub mod trust_context;
 pub mod uppercase;
-pub mod verifier;
+
+pub mod authority_node;
+mod influxdb_token_lease;
 
 mod schema;
 mod session;
 mod util;
 
-pub use rpc_proxy_service::*;
+pub use influxdb_token_lease::*;
 pub use util::*;
 
 #[macro_use]
@@ -154,9 +159,8 @@ extern crate tracing;
 pub struct DefaultAddress;
 
 impl DefaultAddress {
-    pub const IDENTITY_SERVICE: &'static str = "identity_service";
     pub const AUTHENTICATED_SERVICE: &'static str = "authenticated";
-    pub const FORWARDING_SERVICE: &'static str = "forwarding_service";
+    pub const RELAY_SERVICE: &'static str = "forwarding_service";
     pub const UPPERCASE_SERVICE: &'static str = "uppercase";
     pub const ECHO_SERVICE: &'static str = "echo";
     pub const HOP_SERVICE: &'static str = "hop";
@@ -166,11 +170,56 @@ impl DefaultAddress {
     pub const CREDENTIAL_ISSUER: &'static str = "credential_issuer";
     pub const ENROLLMENT_TOKEN_ISSUER: &'static str = "enrollment_token_issuer";
     pub const ENROLLMENT_TOKEN_ACCEPTOR: &'static str = "enrollment_token_acceptor";
-    pub const VERIFIER: &'static str = "verifier";
     pub const OKTA_IDENTITY_PROVIDER: &'static str = "okta";
+    pub const KAFKA_OUTLET: &'static str = "kafka_outlet";
     pub const KAFKA_CONSUMER: &'static str = "kafka_consumer";
     pub const KAFKA_PRODUCER: &'static str = "kafka_producer";
-    pub const RPC_PROXY: &'static str = "rpc_proxy_service";
+    pub const KAFKA_DIRECT: &'static str = "kafka_direct";
+
+    pub fn is_valid(name: &str) -> bool {
+        matches!(
+            name,
+            Self::AUTHENTICATED_SERVICE
+                | Self::RELAY_SERVICE
+                | Self::UPPERCASE_SERVICE
+                | Self::ECHO_SERVICE
+                | Self::HOP_SERVICE
+                | Self::CREDENTIALS_SERVICE
+                | Self::SECURE_CHANNEL_LISTENER
+                | Self::DIRECT_AUTHENTICATOR
+                | Self::CREDENTIAL_ISSUER
+                | Self::ENROLLMENT_TOKEN_ISSUER
+                | Self::ENROLLMENT_TOKEN_ACCEPTOR
+                | Self::OKTA_IDENTITY_PROVIDER
+                | Self::KAFKA_CONSUMER
+                | Self::KAFKA_PRODUCER
+                | Self::KAFKA_OUTLET
+                | Self::KAFKA_DIRECT
+        )
+    }
+
+    pub fn iter() -> impl Iterator<Item = &'static str> {
+        [
+            Self::AUTHENTICATED_SERVICE,
+            Self::RELAY_SERVICE,
+            Self::UPPERCASE_SERVICE,
+            Self::ECHO_SERVICE,
+            Self::HOP_SERVICE,
+            Self::CREDENTIALS_SERVICE,
+            Self::SECURE_CHANNEL_LISTENER,
+            Self::DIRECT_AUTHENTICATOR,
+            Self::CREDENTIAL_ISSUER,
+            Self::ENROLLMENT_TOKEN_ISSUER,
+            Self::ENROLLMENT_TOKEN_ACCEPTOR,
+            Self::OKTA_IDENTITY_PROVIDER,
+            Self::KAFKA_CONSUMER,
+            Self::KAFKA_PRODUCER,
+            Self::KAFKA_OUTLET,
+            Self::KAFKA_DIRECT,
+        ]
+        .iter()
+        .copied()
+    }
 }
 
 pub mod actions {
@@ -190,14 +239,10 @@ use core::fmt;
 use minicbor::{Decode, Encode};
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 
-#[derive(rust_embed::RustEmbed)]
-#[folder = "./static"]
-pub(crate) struct StaticFiles;
-
 /// Newtype around [`Vec<u8>`] that provides base-16 string encoding using serde.
 #[derive(Debug, Clone, Default, Encode, Decode)]
 #[cbor(transparent)]
-pub struct HexByteVec(#[b(0)] pub Vec<u8>);
+pub struct HexByteVec(#[n(0)] pub Vec<u8>);
 
 impl HexByteVec {
     pub fn as_slice(&self) -> &[u8] {
@@ -242,5 +287,43 @@ impl<'de> Deserialize<'de> for HexByteVec {
 impl fmt::Display for HexByteVec {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         self.serialize(f)
+    }
+}
+
+#[cfg(test)]
+mod test {
+    use super::DefaultAddress;
+
+    #[test]
+    fn test_default_address_is_valid() {
+        assert!(!DefaultAddress::is_valid("foo"));
+        assert!(DefaultAddress::is_valid(
+            DefaultAddress::AUTHENTICATED_SERVICE
+        ));
+        assert!(DefaultAddress::is_valid(DefaultAddress::RELAY_SERVICE));
+        assert!(DefaultAddress::is_valid(DefaultAddress::UPPERCASE_SERVICE));
+        assert!(DefaultAddress::is_valid(DefaultAddress::ECHO_SERVICE));
+        assert!(DefaultAddress::is_valid(DefaultAddress::HOP_SERVICE));
+        assert!(DefaultAddress::is_valid(
+            DefaultAddress::CREDENTIALS_SERVICE
+        ));
+        assert!(DefaultAddress::is_valid(
+            DefaultAddress::SECURE_CHANNEL_LISTENER
+        ));
+        assert!(DefaultAddress::is_valid(
+            DefaultAddress::DIRECT_AUTHENTICATOR
+        ));
+        assert!(DefaultAddress::is_valid(DefaultAddress::CREDENTIAL_ISSUER));
+        assert!(DefaultAddress::is_valid(
+            DefaultAddress::ENROLLMENT_TOKEN_ISSUER
+        ));
+        assert!(DefaultAddress::is_valid(
+            DefaultAddress::ENROLLMENT_TOKEN_ACCEPTOR
+        ));
+        assert!(DefaultAddress::is_valid(
+            DefaultAddress::OKTA_IDENTITY_PROVIDER
+        ));
+        assert!(DefaultAddress::is_valid(DefaultAddress::KAFKA_CONSUMER));
+        assert!(DefaultAddress::is_valid(DefaultAddress::KAFKA_PRODUCER));
     }
 }

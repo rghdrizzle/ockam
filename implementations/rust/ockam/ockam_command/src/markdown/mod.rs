@@ -127,36 +127,31 @@ fn generate_markdown_page(
     let buffer = &mut buffer;
 
     let mut p_cmd = get_parent_commands(parent_cmd, " ");
-    if !p_cmd.is_empty() {
-        p_cmd.push(' ');
-    }
 
     // Title
-    writeln!(
+    write!(
         buffer,
-        "## {} {}\n",
+        "## {} {} ",
         p_cmd.replace("ockam ", ""),
         cmd.get_name()
     )?;
-    writeln!(buffer, "---\n")?;
+
+    // Separator after title
+    writeln!(buffer, "\n---\n")?;
+
+    // Before help: used to print the `Preview` tag
+    if let Some(s) = cmd.get_before_help().map(|s| s.to_string()) {
+        if !s.is_empty() {
+            writeln!(buffer, "{}", s)?;
+        }
+    }
 
     // Usage (e.g. "ockam space create [OPTIONS] [NAME] [-- <ADMINS>...]")
     let mut usage = cmd.clone().render_usage().to_string();
     // remove `Usage:` from the string
     usage = usage.replace("Usage: ", "");
     // append parent commands in beginning of the usage
-    writeln!(buffer, "`{}{}`\n", p_cmd, usage)?;
-
-    // Before help (i.e. the doc string of the command): print either the short or the long version
-    if let Some(s) = cmd.get_before_help().map(|s| s.to_string()) {
-        if !s.is_empty() {
-            writeln!(buffer, "{}.\n", s)?;
-        }
-    } else if let Some(s) = cmd.get_before_long_help().map(|s| s.to_string()) {
-        if !s.is_empty() {
-            writeln!(buffer, "{}", process_txt_to_md(s))?;
-        }
-    }
+    writeln!(buffer, "`{} {} `\n", p_cmd, usage)?;
 
     // Long about; fallback to short about
     if let Some(s) = cmd.get_long_about().map(|s| s.to_string()) {
@@ -169,8 +164,36 @@ fn generate_markdown_page(
         }
     }
 
-    // Subcommands list, if any
-    if cmd.get_subcommands().next().is_some() {
+    // Arguments and options if the command has no subcommands
+    if cmd.get_subcommands().next().is_none() {
+        // Arguments
+        if cmd.get_positionals().next().is_some() {
+            writeln!(buffer, "### Arguments\n")?;
+
+            for pos_arg in cmd.get_positionals() {
+                generate_arg_markdown(buffer, pos_arg)?;
+            }
+
+            writeln!(buffer)?;
+        }
+
+        // Options
+        let non_pos: Vec<_> = cmd
+            .get_arguments()
+            .filter(|arg| !arg.is_positional())
+            .collect();
+
+        if !non_pos.is_empty() {
+            writeln!(buffer, "### Options\n")?;
+
+            for arg in non_pos {
+                generate_arg_markdown(buffer, arg)?;
+            }
+
+            writeln!(buffer)?;
+        }
+    } else {
+        // Subcommands list
         writeln!(buffer, "### Subcommands\n")?;
 
         for s_cmd in cmd.get_subcommands() {
@@ -191,34 +214,6 @@ fn generate_markdown_page(
                 s_cmd.get_name()
             )?;
         }
-
-        writeln!(buffer)?;
-    }
-
-    // Arguments
-    if cmd.get_positionals().next().is_some() {
-        writeln!(buffer, "### Arguments\n")?;
-
-        for pos_arg in cmd.get_positionals() {
-            generate_arg_markdown(buffer, pos_arg)?;
-        }
-
-        writeln!(buffer)?;
-    }
-
-    // Options
-    let non_pos: Vec<_> = cmd
-        .get_arguments()
-        .filter(|arg| !arg.is_positional())
-        .collect();
-
-    if !non_pos.is_empty() {
-        writeln!(buffer, "### Options\n")?;
-
-        for arg in non_pos {
-            generate_arg_markdown(buffer, arg)?;
-        }
-
         writeln!(buffer)?;
     }
 
@@ -256,33 +251,38 @@ fn generate_arg_markdown(buffer: &mut Vec<u8>, arg: &clap::Arg) -> io::Result<()
         Some([]) => unreachable!(),
         None => arg.get_id().to_string().to_ascii_uppercase(),
     };
+    let (formatted_value_name, optional) = match arg.is_required_set() {
+        true => (format!("<{value_name}>"), ""),
+        false => (format!("[{value_name}]"), " (optional)"),
+    };
 
     match (arg.get_short(), arg.get_long()) {
         (Some(short), Some(long)) => {
             if arg.get_action().takes_values() {
-                write!(buffer, "`-{short}`, `--{long} <{value_name}>`")?
+                write!(buffer, "`-{short}`, `--{long} {formatted_value_name}`")?
             } else {
                 write!(buffer, "`-{short}`, `--{long}`")?
             }
         }
         (Some(short), None) => {
             if arg.get_action().takes_values() {
-                write!(buffer, "`-{short} <{value_name}>`")?
+                write!(buffer, "`-{short} {formatted_value_name}`")?
             } else {
                 write!(buffer, "`-{short}`")?
             }
         }
         (None, Some(long)) => {
             if arg.get_action().takes_values() {
-                write!(buffer, "`--{} <{value_name}>`", long)?
+                write!(buffer, "`--{} {formatted_value_name}`", long)?
             } else {
                 write!(buffer, "`--{}`", long)?
             }
         }
         (None, None) => {
-            write!(buffer, "`<{value_name}>`",)?;
+            write!(buffer, "`{formatted_value_name}`")?;
         }
     }
+    write!(buffer, "{optional}")?;
 
     if let Some(help) = arg.get_help() {
         writeln!(buffer, "<br/>")?;

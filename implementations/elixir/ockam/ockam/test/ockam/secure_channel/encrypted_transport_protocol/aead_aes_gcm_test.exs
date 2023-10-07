@@ -3,20 +3,11 @@ defmodule Ockam.SecureChannel.EncryptedTransportProtocol.AeadAesGcmTests do
 
   alias Ockam.SecureChannel.EncryptedTransportProtocol.AeadAesGcm.Decryptor
   alias Ockam.SecureChannel.EncryptedTransportProtocol.AeadAesGcm.Encryptor
-  alias Ockam.Vault
-  alias Ockam.Vault.Software, as: SoftwareVault
 
   test "normal flow" do
-    # We can't share the _same_ k between encryptor and decryptor on the same vault, as when the encryptor
-    # rotate the key, it destroy the old k.  But that might still be used by the decryptor to decrypt yet-to-be
-    # delivered packets.
-    {:ok, encryptor_vault} = SoftwareVault.init()
-    {:ok, decryptor_vault} = SoftwareVault.init()
     shared_k = :crypto.strong_rand_bytes(32)
-    {:ok, ke} = Vault.secret_import(encryptor_vault, [type: :aes], shared_k)
-    {:ok, kd} = Vault.secret_import(decryptor_vault, [type: :aes], shared_k)
-    encryptor = Encryptor.new(encryptor_vault, ke, 0)
-    decryptor = Decryptor.new(decryptor_vault, kd, 0)
+    encryptor = Encryptor.new(shared_k, 0)
+    decryptor = Decryptor.new(shared_k, 0)
 
     Enum.reduce(0..200, {encryptor, decryptor}, fn _i, {encryptor, decryptor} ->
       plain = :crypto.strong_rand_bytes(64)
@@ -27,13 +18,9 @@ defmodule Ockam.SecureChannel.EncryptedTransportProtocol.AeadAesGcmTests do
   end
 
   test "message lost" do
-    {:ok, encryptor_vault} = SoftwareVault.init()
-    {:ok, decryptor_vault} = SoftwareVault.init()
     shared_k = :crypto.strong_rand_bytes(32)
-    {:ok, ke} = Vault.secret_import(encryptor_vault, [type: :aes], shared_k)
-    {:ok, kd} = Vault.secret_import(decryptor_vault, [type: :aes], shared_k)
-    encryptor = Encryptor.new(encryptor_vault, ke, 0, 32)
-    decryptor = Decryptor.new(decryptor_vault, kd, 0, 32)
+    encryptor = Encryptor.new(shared_k, 0, 32)
+    decryptor = Decryptor.new(shared_k, 0, 32)
 
     Enum.reduce(0..200, {encryptor, decryptor}, fn i, {encryptor, decryptor} ->
       plain = :crypto.strong_rand_bytes(64)
@@ -52,13 +39,9 @@ defmodule Ockam.SecureChannel.EncryptedTransportProtocol.AeadAesGcmTests do
     # We can't share the _same_ k between encryptor and decryptor on the same vault, as when the encryptor
     # rotate the key, it destroy the old k.  But that might still be used by the decryptor to decrypt yet-to-be
     # delivered packets.
-    {:ok, encryptor_vault} = SoftwareVault.init()
-    {:ok, decryptor_vault} = SoftwareVault.init()
     shared_k = :crypto.strong_rand_bytes(32)
-    {:ok, ke} = Vault.secret_import(encryptor_vault, [type: :aes], shared_k)
-    {:ok, kd} = Vault.secret_import(decryptor_vault, [type: :aes], shared_k)
-    encryptor = Encryptor.new(encryptor_vault, ke, 0, 32)
-    decryptor = Decryptor.new(decryptor_vault, kd, 0, 32)
+    encryptor = Encryptor.new(shared_k, 0, 32)
+    decryptor = Decryptor.new(shared_k, 0, 32)
 
     {msgs, encryptor} =
       Enum.reduce(0..1000, {[], encryptor}, fn _i, {acc, encryptor} ->
@@ -87,5 +70,76 @@ defmodule Ockam.SecureChannel.EncryptedTransportProtocol.AeadAesGcmTests do
     plain = :crypto.strong_rand_bytes(64)
     {:ok, ciphertext, _encryptor} = Encryptor.encrypt(<<>>, plain, encryptor)
     {:ok, ^plain, _decryptor} = Decryptor.decrypt(<<>>, ciphertext, decryptor)
+  end
+
+  test "out of order, exact sliding window" do
+    # Test values taken from nonce_tracker.rs test case
+    shared_k = :crypto.strong_rand_bytes(32)
+    key_renewal_interval = 32
+    encryptor = Encryptor.new(shared_k, 0, key_renewal_interval)
+    decryptor = Decryptor.new(shared_k, 0, key_renewal_interval)
+
+    {msgs, _encryptor} =
+      Enum.reduce(0..(key_renewal_interval * 5), {[], encryptor}, fn _i, {acc, encryptor} ->
+        plain = :crypto.strong_rand_bytes(64)
+        {:ok, ciphertext, encryptor} = Encryptor.encrypt(<<>>, plain, encryptor)
+        {[{plain, ciphertext} | acc], encryptor}
+      end)
+
+    msgs = msgs |> Enum.reverse()
+
+    {plaintext, ciphertext} = Enum.at(msgs, 0)
+    {:ok, ^plaintext, decryptor} = Decryptor.decrypt(<<>>, ciphertext, decryptor)
+
+    {plaintext, ciphertext} = Enum.at(msgs, 1)
+    {:ok, ^plaintext, decryptor} = Decryptor.decrypt(<<>>, ciphertext, decryptor)
+
+    {_, ciphertext} = Enum.at(msgs, 0)
+    {:error, _} = Decryptor.decrypt(<<>>, ciphertext, decryptor)
+
+    {_plaintext, ciphertext} = Enum.at(msgs, key_renewal_interval + 2)
+    {:error, _} = Decryptor.decrypt(<<>>, ciphertext, decryptor)
+
+    {plaintext, ciphertext} = Enum.at(msgs, key_renewal_interval + 1)
+    {:ok, ^plaintext, decryptor} = Decryptor.decrypt(<<>>, ciphertext, decryptor)
+
+    {_plaintext, ciphertext} = Enum.at(msgs, 1)
+    {:error, _} = Decryptor.decrypt(<<>>, ciphertext, decryptor)
+
+    {plaintext, ciphertext} = Enum.at(msgs, key_renewal_interval + 2)
+    {:ok, ^plaintext, decryptor} = Decryptor.decrypt(<<>>, ciphertext, decryptor)
+    {plaintext, ciphertext} = Enum.at(msgs, key_renewal_interval + 3)
+    {:ok, ^plaintext, decryptor} = Decryptor.decrypt(<<>>, ciphertext, decryptor)
+
+    {_plaintext, ciphertext} = Enum.at(msgs, key_renewal_interval + 1)
+    {:error, _} = Decryptor.decrypt(<<>>, ciphertext, decryptor)
+    {_plaintext, ciphertext} = Enum.at(msgs, key_renewal_interval + 2)
+    {:error, _} = Decryptor.decrypt(<<>>, ciphertext, decryptor)
+
+    {plaintext, ciphertext} = Enum.at(msgs, 2 * key_renewal_interval)
+    {:ok, ^plaintext, decryptor} = Decryptor.decrypt(<<>>, ciphertext, decryptor)
+
+    {_plaintext, ciphertext} = Enum.at(msgs, key_renewal_interval - 1)
+    {:error, _} = Decryptor.decrypt(<<>>, ciphertext, decryptor)
+
+    {plaintext, ciphertext} = Enum.at(msgs, 3 * key_renewal_interval)
+    {:ok, ^plaintext, decryptor} = Decryptor.decrypt(<<>>, ciphertext, decryptor)
+    {plaintext, ciphertext} = Enum.at(msgs, 4 * key_renewal_interval)
+    {:ok, ^plaintext, decryptor} = Decryptor.decrypt(<<>>, ciphertext, decryptor)
+
+    decryptor =
+      Enum.reduce((3 * key_renewal_interval + 1)..(4 * key_renewal_interval - 1), decryptor, fn i,
+                                                                                                decryptor ->
+        {plaintext, ciphertext} = Enum.at(msgs, i)
+        {:ok, ^plaintext, decryptor} = Decryptor.decrypt(<<>>, ciphertext, decryptor)
+        decryptor
+      end)
+
+    Enum.reduce((4 * key_renewal_interval + 1)..(5 * key_renewal_interval), decryptor, fn i,
+                                                                                          decryptor ->
+      {plaintext, ciphertext} = Enum.at(msgs, i)
+      {:ok, ^plaintext, decryptor} = Decryptor.decrypt(<<>>, ciphertext, decryptor)
+      decryptor
+    end)
   end
 end

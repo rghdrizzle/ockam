@@ -1,18 +1,21 @@
-use crate::{
-    util::{api, exitcode, extract_address_value, node_rpc, Rpc},
-    CommandGlobalOpts, OutputFormat, Result,
-};
 use std::str::FromStr;
 
+use clap::Parser;
 use colorful::Colorful;
 use serde_json::json;
 
-use crate::docs;
-use crate::util::is_tty;
-use clap::Parser;
 use ockam::{route, Context};
+use ockam_api::nodes::BackgroundNode;
 use ockam_api::{nodes::models::secure_channel::DeleteSecureChannelResponse, route_to_multiaddr};
 use ockam_core::{Address, AddressParseError};
+
+use crate::docs;
+use crate::node::get_node_name;
+use crate::util::{is_tty, parse_node_name};
+use crate::{
+    util::{api, exitcode, node_rpc},
+    CommandGlobalOpts, OutputFormat,
+};
 
 const LONG_ABOUT: &str = include_str!("./static/delete/long_about.txt");
 const AFTER_LONG_HELP: &str = include_str!("./static/delete/after_long_help.txt");
@@ -20,18 +23,22 @@ const AFTER_LONG_HELP: &str = include_str!("./static/delete/after_long_help.txt"
 /// Delete Secure Channels
 #[derive(Clone, Debug, Parser)]
 #[command(
-    arg_required_else_help = true,
-    long_about = docs::about(LONG_ABOUT),
-    after_long_help = docs::after_help(AFTER_LONG_HELP),
+arg_required_else_help = true,
+long_about = docs::about(LONG_ABOUT),
+after_long_help = docs::after_help(AFTER_LONG_HELP),
 )]
 pub struct DeleteCommand {
-    /// Node at which the secure channel was initiated (required)
+    /// Node at which the secure channel was initiated
     #[arg(value_name = "NODE", long, display_order = 800)]
-    at: String,
+    at: Option<String>,
 
-    /// Address at which the channel to be deleted is running (required)
+    /// Address at which the channel to be deleted is running
     #[arg(value_parser(parse_address), display_order = 800)]
     address: Address,
+
+    /// Confirm the deletion without prompting
+    #[arg(display_order = 901, long, short)]
+    yes: bool,
 }
 
 impl DeleteCommand {
@@ -39,21 +46,16 @@ impl DeleteCommand {
         node_rpc(rpc, (options, self));
     }
 
-    // Read the `at` argument and return node name
-    fn parse_at_node(&self) -> String {
-        extract_address_value(&self.at).unwrap_or_else(|_| "".to_string())
-    }
-
     fn print_output(
         &self,
-        parsed_at: &String,
+        node_name: &String,
         address: &Address,
         options: &CommandGlobalOpts,
         response: DeleteSecureChannelResponse,
     ) {
         match response.channel {
             Some(address) => {
-                let route = &route![address.to_string()];
+                let route = &route![address];
                 match route_to_multiaddr(route) {
                     Some(multiaddr) => {
                         // if stdout is not interactive/tty write the secure channel address to it
@@ -76,14 +78,14 @@ impl DeleteCommand {
                         {
                             if options.global_args.no_color {
                                 eprintln!("\n  Deleted Secure Channel:");
-                                eprintln!("  •        At: /node/{}", &self.at);
+                                eprintln!("  •        At: /node/{}", &node_name);
                                 eprintln!("  •   Address: {}", &self.address);
                             } else {
                                 eprintln!("\n  Deleted Secure Channel:");
 
                                 // At:
                                 eprintln!("{}", "  •        At: ".light_magenta());
-                                eprintln!("{}", format!("/node/{parsed_at}").light_yellow());
+                                eprintln!("{}", format!("/node/{node_name}").light_yellow());
 
                                 // Address:
                                 eprintln!("{}", "  •   Address: ".light_magenta());
@@ -118,7 +120,7 @@ impl DeleteCommand {
                 {
                     eprintln!(
                         "Could not find secure channel with address {} at node {}",
-                        address, &self.at
+                        address, &node_name
                     );
                 }
 
@@ -128,7 +130,7 @@ impl DeleteCommand {
     }
 }
 
-fn parse_address(input: &str) -> core::result::Result<Address, AddressParseError> {
+fn parse_address(input: &str) -> Result<Address, AddressParseError> {
     let buf: String = input.into();
 
     if buf.contains("/service/") {
@@ -145,16 +147,18 @@ fn parse_address(input: &str) -> core::result::Result<Address, AddressParseError
     Address::from_str(&buf)
 }
 
-async fn rpc(ctx: Context, (options, command): (CommandGlobalOpts, DeleteCommand)) -> Result<()> {
-    let at = &command.parse_at_node();
-    let address = &command.address;
-
-    let mut rpc = Rpc::background(&ctx, &options, at)?;
-    let request = api::delete_secure_channel(address);
-    rpc.request(request).await?;
-    let response = rpc.parse_response::<DeleteSecureChannelResponse>()?;
-
-    command.print_output(at, address, &options, response);
-
+async fn rpc(ctx: Context, (opts, cmd): (CommandGlobalOpts, DeleteCommand)) -> miette::Result<()> {
+    if opts.terminal.confirmed_with_flag_or_prompt(
+        cmd.yes,
+        "Are you sure you want to delete this secure channel?",
+    )? {
+        let at = get_node_name(&opts.state, &cmd.at);
+        let node_name = parse_node_name(&at)?;
+        let address = &cmd.address;
+        let node = BackgroundNode::create(&ctx, &opts.state, &node_name).await?;
+        let response: DeleteSecureChannelResponse =
+            node.ask(&ctx, api::delete_secure_channel(address)).await?;
+        cmd.print_output(&node_name, address, &opts, response);
+    }
     Ok(())
 }

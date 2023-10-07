@@ -1,13 +1,16 @@
-use super::Result;
-use crate::cli_state::traits::StateItemTrait;
-use crate::cli_state::{CliStateError, StateDirTrait, DATA_DIR_NAME};
-use ockam_identity::IdentitiesVault;
-use ockam_vault::Vault;
-use ockam_vault_aws::{AwsKmsConfig, AwsSecurityModule};
-use serde::{Deserialize, Serialize};
 use std::fmt::{Display, Formatter};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
+
+use serde::{Deserialize, Serialize};
+
+use ockam::identity::Vault;
+use ockam_vault_aws::AwsSigningVault;
+
+use crate::cli_state::traits::StateItemTrait;
+use crate::cli_state::{CliStateError, StateDirTrait, DATA_DIR_NAME};
+
+use super::Result;
 
 #[derive(Debug, Clone, Eq, PartialEq)]
 pub struct VaultsState {
@@ -17,7 +20,10 @@ pub struct VaultsState {
 impl VaultsState {
     pub async fn create_async(&self, name: &str, config: VaultConfig) -> Result<VaultState> {
         if self.exists(name) {
-            return Err(CliStateError::AlreadyExists);
+            return Err(CliStateError::AlreadyExists {
+                resource: Self::default_filename().to_string(),
+                name: name.to_string(),
+            });
         }
         let state = VaultState::new(self.path(name), config)?;
         state.get().await?;
@@ -28,7 +34,7 @@ impl VaultsState {
     }
 }
 
-#[derive(Debug, Clone, Eq, PartialEq)]
+#[derive(Debug, Clone, Eq, PartialEq, Serialize)]
 pub struct VaultState {
     name: String,
     path: PathBuf,
@@ -38,16 +44,14 @@ pub struct VaultState {
 }
 
 impl VaultState {
-    pub async fn get(&self) -> Result<Arc<Vault>> {
+    pub async fn get(&self) -> Result<Vault> {
         if self.config.aws_kms {
-            let config = AwsKmsConfig::default().await?;
-            Ok(Vault::create_with_security_module(
-                AwsSecurityModule::create_with_storage_path(
-                    config,
-                    self.vault_file_path().as_path(),
-                )
-                .await?,
-            ))
+            let mut vault = Vault::create();
+            let aws_vault = Arc::new(AwsSigningVault::create().await?);
+            vault.identity_vault = aws_vault.clone();
+            vault.credential_vault = aws_vault;
+
+            Ok(vault)
         } else {
             let vault =
                 Vault::create_with_persistent_storage_path(self.vault_file_path().as_path())
@@ -67,7 +71,7 @@ impl VaultState {
         &self.data_path
     }
 
-    pub async fn identities_vault(&self) -> Result<Arc<dyn IdentitiesVault>> {
+    pub async fn vault(&self) -> Result<Vault> {
         let path = self.vault_file_path().clone();
         let vault = Vault::create_with_persistent_storage_path(path.as_path()).await?;
         Ok(vault)
@@ -110,10 +114,12 @@ impl VaultConfig {
 }
 
 mod traits {
-    use super::*;
+    use ockam_core::async_trait;
+
     use crate::cli_state::file_stem;
     use crate::cli_state::traits::*;
-    use ockam_core::async_trait;
+
+    use super::*;
 
     #[async_trait]
     impl StateDirTrait for VaultsState {
@@ -122,8 +128,10 @@ mod traits {
         const DIR_NAME: &'static str = "vaults";
         const HAS_DATA_DIR: bool = true;
 
-        fn new(dir: PathBuf) -> Self {
-            Self { dir }
+        fn new(root_path: &Path) -> Self {
+            Self {
+                dir: Self::build_dir(root_path),
+            }
         }
 
         fn dir(&self) -> &PathBuf {
@@ -162,6 +170,7 @@ mod traits {
 
         fn new(path: PathBuf, config: Self::Config) -> Result<Self> {
             let contents = serde_json::to_string(&config)?;
+            std::fs::create_dir_all(path.parent().unwrap())?;
             std::fs::write(&path, contents)?;
             let name = file_stem(&path)?;
             let data_path = VaultState::build_data_path(&name, &path);

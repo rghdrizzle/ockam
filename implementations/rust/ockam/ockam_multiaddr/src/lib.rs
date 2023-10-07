@@ -537,6 +537,10 @@ impl MultiAddr {
         self.try_extend(iter)?;
         Ok(self)
     }
+    /// Check if the protocol codes starts with the given code.
+    pub fn starts_with(&self, code: Code) -> bool {
+        self.matches(0, &[code.into()])
+    }
 
     /// Check if the protocol codes match the given sequence.
     pub fn matches<'a, I>(&self, start: usize, codes: I) -> bool
@@ -759,7 +763,7 @@ impl<'a> Iterator for ProtoIter<'a> {
     }
 }
 
-// This iterator is only constructed from a MutiAddr value, hence
+// This iterator is only constructed from a MultiAddr value, hence
 // the protocol parts are valid by construction and we expect them to be.
 #[derive(Debug)]
 struct ValidBytesIter<'a>(iter::BytesIter<'a>);

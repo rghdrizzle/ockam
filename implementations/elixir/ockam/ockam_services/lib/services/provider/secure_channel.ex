@@ -5,7 +5,8 @@ defmodule Ockam.Services.Provider.SecureChannel do
   """
   @behaviour Ockam.Services.Provider
 
-  alias Ockam.Vault.Software, as: SoftwareVault
+  alias Ockam.Identity
+  alias Ockam.SecureChannel.Crypto
 
   @services [:secure_channel]
 
@@ -32,31 +33,36 @@ defmodule Ockam.Services.Provider.SecureChannel do
   end
 
   def service_options(:secure_channel, args) do
-    ## TODO: make it possible to read service identity from some storage
-    identity_module = Keyword.get(args, :identity_module, Ockam.Identity.default_implementation())
-
     trust_policies =
       Keyword.get(args, :trust_policies, [
         {:cached_identity, [Ockam.Identity.TrustPolicy.KnownIdentitiesEts]}
       ])
 
-    other_args = Keyword.drop(args, [:identity_module, :trust_policies])
+    other_args = Keyword.drop(args, [:trust_policies])
 
-    with {:ok, vault} <- SoftwareVault.init(),
-         {:ok, keypair} <- Ockam.Vault.secret_generate(vault, type: :curve25519) do
-      Keyword.merge(
-        [
-          identity: :dynamic,
-          identity_module: identity_module,
-          encryption_options: [vault: vault, static_keypair: keypair],
-          address: "secure_channel",
-          trust_policies: trust_policies
-        ],
-        other_args
-      )
-    else
-      error ->
-        raise "error starting service options for identity secure channel: #{inspect(error)}"
-    end
+    # Create a identity and purpose key if not provided
+    other_args =
+      Keyword.put_new_lazy(other_args, :identity, fn ->
+        {:ok, identity} = Identity.create()
+        identity
+      end)
+
+    other_args =
+      Keyword.put_new_lazy(other_args, :encryption_options, fn ->
+        {:ok, keypair} = Crypto.generate_dh_keypair()
+
+        {:ok, attestation} =
+          Identity.attest_purpose_key(Keyword.get(other_args, :identity), keypair)
+
+        [static_keypair: keypair, static_key_attestation: attestation]
+      end)
+
+    Keyword.merge(
+      [
+        address: "secure_channel",
+        trust_policies: trust_policies
+      ],
+      other_args
+    )
   end
 end

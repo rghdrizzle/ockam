@@ -1,29 +1,29 @@
 use minicbor::{Decode, Encode};
 use serde::{Deserialize, Serialize};
 
-use ockam_core::CowStr;
-#[cfg(feature = "tag")]
-use ockam_core::TypeTag;
+use crate::cloud::Controller;
+use ockam_core::api::{Error, Reply, Request, Status};
+use ockam_core::{self, async_trait, Result};
+use ockam_node::Context;
+
+const TARGET: &str = "ockam_api::cloud::subscription";
+const API_SERVICE: &str = "subscriptions";
 
 #[derive(Encode, Decode, Debug)]
 #[cfg_attr(test, derive(Clone))]
 #[rustfmt::skip]
 #[cbor(map)]
-pub struct ActivateSubscription<'a> {
-    #[cfg(feature = "tag")]
-    #[n(0)] pub tag: TypeTag<3888657>,
-    #[b(1)] pub space_id: Option<CowStr<'a>>,
-    #[b(2)] pub subscription_data: CowStr<'a>,
-    #[b(3)] pub space_name: Option<CowStr<'a>>,
-    #[b(4)] pub owner_emails: Option<Vec<CowStr<'a>>>,
+pub struct ActivateSubscription {
+    #[n(1)] pub space_id: Option<String>,
+    #[n(2)] pub subscription_data: String,
+    #[n(3)] pub space_name: Option<String>,
+    #[n(4)] pub owner_emails: Option<Vec<String>>,
 }
 
-impl<'a> ActivateSubscription<'a> {
+impl ActivateSubscription {
     /// Activates a subscription for an existing space
-    pub fn existing<S: Into<CowStr<'a>>>(space_id: S, subscription_data: S) -> Self {
+    pub fn existing<S: Into<String>>(space_id: S, subscription_data: S) -> Self {
         Self {
-            #[cfg(feature = "tag")]
-            tag: TypeTag,
             space_id: Some(space_id.into()),
             subscription_data: subscription_data.into(),
             space_name: None,
@@ -33,23 +33,16 @@ impl<'a> ActivateSubscription<'a> {
 
     /// Activates a subscription for a space that will be newly created with the given space name
     #[allow(unused)]
-    pub fn create<S: Into<CowStr<'a>>, T: AsRef<str>>(
+    pub fn create<S: Into<String>, T: AsRef<str>>(
         space_name: S,
-        owner_emails: &'a [T],
+        owner_emails: &[T],
         subscription_data: S,
     ) -> Self {
         Self {
-            #[cfg(feature = "tag")]
-            tag: TypeTag,
             space_id: None,
             subscription_data: subscription_data.into(),
             space_name: Some(space_name.into()),
-            owner_emails: Some(
-                owner_emails
-                    .iter()
-                    .map(|x| CowStr::from(x.as_ref()))
-                    .collect(),
-            ),
+            owner_emails: Some(owner_emails.iter().map(|x| x.as_ref().into()).collect()),
         }
     }
 }
@@ -57,202 +50,187 @@ impl<'a> ActivateSubscription<'a> {
 #[derive(Encode, Decode, Serialize, Deserialize, Debug)]
 #[cfg_attr(test, derive(Clone))]
 #[cbor(map)]
-pub struct Subscription<'a> {
-    #[cfg(feature = "tag")]
-    #[serde(skip)]
-    #[n(0)]
-    pub tag: TypeTag<3783606>,
-    #[b(1)]
-    #[serde(borrow)]
-    pub id: CowStr<'a>,
-    #[b(2)]
-    #[serde(borrow)]
-    marketplace: CowStr<'a>,
-    #[b(3)]
-    #[serde(borrow)]
-    pub status: CowStr<'a>,
-    #[b(4)]
-    #[serde(borrow)]
-    pub entitlements: CowStr<'a>,
-    #[b(5)]
-    #[serde(borrow)]
-    pub metadata: CowStr<'a>,
-    #[b(6)]
-    #[serde(borrow)]
-    pub contact_info: CowStr<'a>,
-    #[b(7)]
-    #[serde(borrow)]
-    pub space_id: Option<CowStr<'a>>,
+pub struct Subscription {
+    #[n(1)]
+    pub id: String,
+    #[n(2)]
+    marketplace: String,
+    #[n(3)]
+    pub status: String,
+    #[n(4)]
+    pub entitlements: String,
+    #[n(5)]
+    pub metadata: String,
+    #[n(6)]
+    pub contact_info: String,
+    #[n(7)]
+    pub space_id: Option<String>,
 }
 
-mod node {
-    use minicbor::Decoder;
-    use tracing::trace;
+#[async_trait]
+pub trait Subscriptions {
+    async fn activate_subscription(
+        &self,
+        ctx: &Context,
+        space_id: String,
+        subscription_data: String,
+    ) -> Result<Reply<Subscription>>;
 
-    use ockam_core::api::Request;
-    use ockam_core::{self, Result};
-    use ockam_node::Context;
+    async fn unsubscribe(
+        &self,
+        ctx: &Context,
+        subscription_id: String,
+    ) -> Result<Reply<Subscription>>;
 
-    use crate::cloud::{BareCloudRequestWrapper, CloudRequestWrapper};
-    use crate::nodes::NodeManagerWorker;
+    async fn update_subscription_contact_info(
+        &self,
+        ctx: &Context,
+        subscription_id: String,
+        contact_info: String,
+    ) -> Result<Reply<Subscription>>;
+
+    async fn update_subscription_space(
+        &self,
+        ctx: &Context,
+        subscription_id: String,
+        new_space_id: String,
+    ) -> Result<Reply<Subscription>>;
+
+    async fn get_subscriptions(&self, ctx: &Context) -> Result<Reply<Vec<Subscription>>>;
+
+    async fn get_subscription(
+        &self,
+        ctx: &Context,
+        subscription_id: String,
+    ) -> Result<Reply<Subscription>>;
+
+    async fn get_subscription_by_space_id(
+        &self,
+        ctx: &Context,
+        space_id: String,
+    ) -> Result<Reply<Subscription>>;
+}
+
+#[async_trait]
+impl Subscriptions for Controller {
+    async fn activate_subscription(
+        &self,
+        ctx: &Context,
+        space_id: String,
+        subscription_data: String,
+    ) -> Result<Reply<Subscription>> {
+        let req_body = ActivateSubscription::existing(space_id, subscription_data);
+        trace!(target: TARGET, space_id = ?req_body.space_id, space_name = ?req_body.space_name, "activating subscription");
+        let req = Request::post("/v0/activate").body(req_body);
+        self.0.ask(ctx, API_SERVICE, req).await
+    }
+
+    async fn unsubscribe(
+        &self,
+        ctx: &Context,
+        subscription_id: String,
+    ) -> Result<Reply<Subscription>> {
+        trace!(target: TARGET, subscription = %subscription_id, "unsubscribing");
+        let req = Request::put(format!("/v0/{subscription_id}/unsubscribe"));
+        self.0.ask(ctx, API_SERVICE, req).await
+    }
+
+    async fn update_subscription_contact_info(
+        &self,
+        ctx: &Context,
+        subscription_id: String,
+        contact_info: String,
+    ) -> Result<Reply<Subscription>> {
+        trace!(target: TARGET, subscription = %subscription_id, "updating subscription contact info");
+        let req = Request::put(format!("/v0/{subscription_id}/contact_info")).body(contact_info);
+        self.0.ask(ctx, API_SERVICE, req).await
+    }
+
+    async fn update_subscription_space(
+        &self,
+        ctx: &Context,
+        subscription_id: String,
+        new_space_id: String,
+    ) -> Result<Reply<Subscription>> {
+        trace!(target: TARGET, subscription = %subscription_id, new_space_id = %new_space_id, "updating subscription space");
+        let req = Request::put(format!("/v0/{subscription_id}/space_id")).body(new_space_id);
+        self.0.ask(ctx, API_SERVICE, req).await
+    }
+
+    async fn get_subscriptions(&self, ctx: &Context) -> Result<Reply<Vec<Subscription>>> {
+        trace!(target: TARGET, "listing subscriptions");
+        let req = Request::get("/v0/");
+        self.0.ask(ctx, API_SERVICE, req).await
+    }
+
+    async fn get_subscription(
+        &self,
+        ctx: &Context,
+        subscription_id: String,
+    ) -> Result<Reply<Subscription>> {
+        trace!(target: TARGET, subscription = %subscription_id, "getting subscription");
+        let req = Request::get(format!("/v0/{subscription_id}"));
+        self.0.ask(ctx, API_SERVICE, req).await
+    }
+
+    async fn get_subscription_by_space_id(
+        &self,
+        ctx: &Context,
+        space_id: String,
+    ) -> Result<Reply<Subscription>> {
+        let subscriptions: Vec<Subscription> = self.get_subscriptions(ctx).await?.success()?;
+        let subscription = subscriptions
+            .into_iter()
+            .find(|s| s.space_id == Some(space_id.clone()));
+        match subscription {
+            Some(subscription) => Ok(Reply::Successful(subscription)),
+            None => Ok(Reply::Failed(
+                Error::new_without_path(),
+                Some(Status::NotFound),
+            )),
+        }
+    }
+}
+
+#[cfg(test)]
+pub mod tests {
+    use quickcheck::{quickcheck, Arbitrary, Gen, TestResult};
+
+    use crate::schema::tests::validate_with_schema;
 
     use super::*;
 
-    const TARGET: &str = "ockam_api::cloud::subscription";
-    const API_SERVICE: &str = "subscriptions";
-
-    impl NodeManagerWorker {
-        pub(crate) async fn unsubscribe(
-            &mut self,
-            ctx: &mut Context,
-            dec: &mut Decoder<'_>,
-            id: &str,
-        ) -> Result<Vec<u8>> {
-            let req_wrapper: BareCloudRequestWrapper = dec.decode()?;
-            let cloud_multiaddr = req_wrapper.multiaddr()?;
-
-            let label = "unsubscribe";
-            trace!(target: TARGET, subscription = %id, "unsubscribing");
-
-            let req_builder = Request::put(format!("/v0/{id}/unsubscribe"));
-
-            self.request_controller(
-                ctx,
-                label,
-                None,
-                &cloud_multiaddr,
-                API_SERVICE,
-                req_builder,
-                None,
-            )
-            .await
+    quickcheck! {
+        fn subcription(s: Subscription) -> TestResult {
+            validate_with_schema("subscription", s)
         }
 
-        pub(crate) async fn update_subscription_space(
-            &mut self,
-            ctx: &mut Context,
-            dec: &mut Decoder<'_>,
-            id: &str,
-        ) -> Result<Vec<u8>> {
-            let req_wrapper: CloudRequestWrapper<String> = dec.decode()?;
-            let cloud_multiaddr = req_wrapper.multiaddr()?;
-            let req_body = req_wrapper.req;
-
-            let label = "list_sbuscriptions";
-            trace!(target: TARGET, subscription = %id, "updating subscription space");
-
-            let req_builder = Request::put(format!("/v0/{id}/space_id")).body(req_body);
-
-            self.request_controller(
-                ctx,
-                label,
-                None,
-                &cloud_multiaddr,
-                API_SERVICE,
-                req_builder,
-                None,
-            )
-            .await
+        fn activate_subcription(s: ActivateSubscription) -> TestResult {
+            validate_with_schema("activate_subscription", s)
         }
-        pub(crate) async fn update_subscription_contact_info(
-            &mut self,
-            ctx: &mut Context,
-            dec: &mut Decoder<'_>,
-            id: &str,
-        ) -> Result<Vec<u8>> {
-            let req_wrapper: CloudRequestWrapper<String> = dec.decode()?;
-            let cloud_multiaddr = req_wrapper.multiaddr()?;
-            let req_body = req_wrapper.req;
+    }
 
-            let label = "update_subscription_contact_info";
-            trace!(target: TARGET, subscription = %id, "updating subscription contact info");
-
-            let req_builder = Request::put(format!("/v0/{id}/contact_info")).body(req_body);
-
-            self.request_controller(
-                ctx,
-                label,
-                None,
-                &cloud_multiaddr,
-                API_SERVICE,
-                req_builder,
-                None,
-            )
-            .await
+    impl Arbitrary for Subscription {
+        fn arbitrary(g: &mut Gen) -> Self {
+            Subscription {
+                id: String::arbitrary(g),
+                marketplace: String::arbitrary(g),
+                status: String::arbitrary(g),
+                entitlements: String::arbitrary(g),
+                metadata: String::arbitrary(g),
+                contact_info: String::arbitrary(g),
+                space_id: bool::arbitrary(g).then(|| String::arbitrary(g)),
+            }
         }
-        pub(crate) async fn list_subscriptions(
-            &mut self,
-            ctx: &mut Context,
-            dec: &mut Decoder<'_>,
-        ) -> Result<Vec<u8>> {
-            let req_wrapper: BareCloudRequestWrapper = dec.decode()?;
-            let cloud_multiaddr = req_wrapper.multiaddr()?;
+    }
 
-            let label = "list_subscriptions";
-            trace!(target: TARGET, "listing subscriptions");
-
-            let req_builder = Request::get("/v0/");
-
-            self.request_controller(
-                ctx,
-                label,
-                None,
-                &cloud_multiaddr,
-                API_SERVICE,
-                req_builder,
-                None,
+    impl Arbitrary for ActivateSubscription {
+        fn arbitrary(g: &mut Gen) -> Self {
+            ActivateSubscription::create(
+                String::arbitrary(g),
+                &[String::arbitrary(g), String::arbitrary(g)],
+                String::arbitrary(g),
             )
-            .await
-        }
-        pub(crate) async fn get_subscription(
-            &mut self,
-            ctx: &mut Context,
-            dec: &mut Decoder<'_>,
-            id: &str,
-        ) -> Result<Vec<u8>> {
-            let req_wrapper: BareCloudRequestWrapper = dec.decode()?;
-            let cloud_multiaddr = req_wrapper.multiaddr()?;
-
-            let label = "get_subscription";
-            trace!(target: TARGET, subscription = %id, "getting subscription");
-
-            let req_builder = Request::get(format!("/v0/{id}"));
-
-            self.request_controller(
-                ctx,
-                label,
-                None,
-                &cloud_multiaddr,
-                API_SERVICE,
-                req_builder,
-                None,
-            )
-            .await
-        }
-        pub(crate) async fn activate_subscription(
-            &mut self,
-            ctx: &mut Context,
-            dec: &mut Decoder<'_>,
-        ) -> Result<Vec<u8>> {
-            let req_wrapper: CloudRequestWrapper<ActivateSubscription> = dec.decode()?;
-            let cloud_multiaddr = req_wrapper.multiaddr()?;
-            let req_body = req_wrapper.req;
-
-            let label = "activate_subscription";
-            trace!(target: TARGET, space_id = ?req_body.space_id, space_name = ?req_body.space_name, "activating subscription");
-
-            let req_builder = Request::post("/v0/activate").body(req_body);
-
-            self.request_controller(
-                ctx,
-                label,
-                "activate_request",
-                &cloud_multiaddr,
-                API_SERVICE,
-                req_builder,
-                None,
-            )
-            .await
         }
     }
 }
